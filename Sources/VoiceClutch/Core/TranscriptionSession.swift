@@ -23,13 +23,53 @@ final class TranscriptionSession {
             return
         }
 
+        let prepareStart = Date()
         let processor = try await ASRProcessor()
+
+        let preloadStart = Date()
         try await processor.preload()
-        try await processor.warmUpIfNeeded()
+        let preloadDuration = Date().timeIntervalSince(preloadStart)
+
+        let warmUpStart = Date()
+        var warmUpError: Error?
+        do {
+            try await processor.warmUpIfNeeded()
+        } catch {
+            warmUpError = error
+        }
+        let warmUpDuration = Date().timeIntervalSince(warmUpStart)
 
         asrProcessor = processor
         audioManager.setASRProcessor(processor)
         isReady = true
+
+        let totalDuration = Date().timeIntervalSince(prepareStart)
+        debugLogPrepareTimings(
+            totalDuration: totalDuration,
+            preloadDuration: preloadDuration,
+            warmUpDuration: warmUpDuration,
+            warmUpError: warmUpError
+        )
+    }
+
+    private func debugLogPrepareTimings(
+        totalDuration: TimeInterval,
+        preloadDuration: TimeInterval,
+        warmUpDuration: TimeInterval,
+        warmUpError: Error?
+    ) {
+        #if DEBUG
+        let totalMs = Int((totalDuration * 1_000).rounded())
+        let preloadMs = Int((preloadDuration * 1_000).rounded())
+        let warmUpMs = Int((warmUpDuration * 1_000).rounded())
+        let warmUpStatus = warmUpError == nil ? "success" : "failed"
+
+        print("⏱️ ASR prepare total=\(totalMs)ms preload=\(preloadMs)ms warmup=\(warmUpMs)ms status=\(warmUpStatus)")
+
+        if let warmUpError {
+            print("⚠️ ASR warm-up failed: \(warmUpError)")
+        }
+        #endif
     }
 
     /// Start a recording and forward partial/final transcription results.

@@ -5,6 +5,8 @@ import QuartzCore
 class StatusBarController: NSObject {
     private var statusItem: NSStatusItem
     private var menu: NSMenu
+    private var statusMenuItem: NSMenuItem?
+    private weak var statusMenuLabel: NSTextField?
     private let preferencesWindowController: PreferencesWindowController
     private let toolbarIcon: NSImage?
     private let activeListeningToolbarIcon: NSImage?
@@ -32,25 +34,18 @@ class StatusBarController: NSObject {
     }
 
     private func setupMenu() {
-        // Title item (disabled)
-        let titleItem = NSMenuItem(
-            title: "VoiceClutch",
-            action: nil,
-            keyEquivalent: ""
-        )
-        titleItem.isEnabled = false
-        menu.addItem(titleItem)
+        menu.autoenablesItems = false
 
-        menu.addItem(NSMenuItem.separator())
-
-        // Status item (disabled, shows current state)
-        let statusItem = NSMenuItem(
+        // Status item (non-interactive, shows current state)
+        let statusMenuItem = NSMenuItem(
             title: "Ready",
             action: nil,
             keyEquivalent: ""
         )
-        statusItem.isEnabled = false
-        menu.addItem(statusItem)
+        statusMenuItem.isEnabled = false
+        statusMenuItem.view = makeStatusMenuItemView(title: "Ready", color: .systemGreen)
+        self.statusMenuItem = statusMenuItem
+        menu.addItem(statusMenuItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -61,6 +56,7 @@ class StatusBarController: NSObject {
             keyEquivalent: ""
         )
         prefsItem.target = self
+        prefsItem.isEnabled = true
         menu.addItem(prefsItem)
 
         menu.addItem(NSMenuItem.separator())
@@ -72,6 +68,7 @@ class StatusBarController: NSObject {
             keyEquivalent: "q"
         )
         quitItem.target = self
+        quitItem.isEnabled = true
         menu.addItem(quitItem)
 
         self.statusItem.menu = menu
@@ -108,31 +105,33 @@ class StatusBarController: NSObject {
     }
 
     func updateMenu(for state: VoiceClutchState) {
-        // The status item is at index 2 (0 = title, 1 = separator, 2 = status)
-        guard menu.numberOfItems > 2,
-              let statusItem = menu.item(at: 2) else { return }
-
+        let title: String
+        let color: NSColor
         switch state {
         case .idle:
-            statusItem.title = "Ready"
+            title = "Ready"
+            color = .systemGreen
         case .recording:
-            statusItem.title = "Recording"
+            title = "Recording"
+            color = .labelColor
         case .processing:
-            statusItem.title = "Processing"
+            title = "Processing"
+            color = .labelColor
         case .downloading:
-            statusItem.title = "Downloading"
+            title = "Downloading model"
+            color = NSColor(srgbRed: 1.0, green: 0.6, blue: 0.0, alpha: 1.0)
         case .loadingModel:
-            statusItem.title = "Loading model"
+            title = "Loading model"
+            color = NSColor(srgbRed: 1.0, green: 0.6, blue: 0.0, alpha: 1.0)
         }
+
+        setStatusMenuLabel(title: title, color: color)
     }
 
     func updateDownloadProgress(_ progress: Double) {
-        // The status item is at index 2 (0 = title, 1 = separator, 2 = status)
-        guard menu.numberOfItems > 2,
-              let statusItem = menu.item(at: 2) else { return }
-
         let progressPercent = Int(progress * 100)
-        statusItem.title = "Downloading \(progressPercent)%"
+        let orange = NSColor(srgbRed: 1.0, green: 0.6, blue: 0.0, alpha: 1.0)
+        setStatusMenuLabel(title: "Downloading model \(progressPercent)%", color: orange)
     }
 
     func showToolbarNotification(_ message: String, duration: TimeInterval = 3.0) {
@@ -204,6 +203,35 @@ class StatusBarController: NSObject {
 
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
+    }
+
+    private func makeStatusMenuItemView(title: String, color: NSColor) -> NSView {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 170, height: 22))
+        container.translatesAutoresizingMaskIntoConstraints = false
+
+        let label = NSTextField(labelWithString: title)
+        label.font = NSFont.menuFont(ofSize: NSFont.systemFontSize)
+        label.textColor = color
+        label.lineBreakMode = .byTruncatingTail
+        label.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            container.widthAnchor.constraint(equalToConstant: 170),
+            container.heightAnchor.constraint(equalToConstant: 22),
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
+            label.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+        ])
+
+        statusMenuLabel = label
+        return container
+    }
+
+    private func setStatusMenuLabel(title: String, color: NSColor) {
+        statusMenuItem?.title = title
+        statusMenuLabel?.stringValue = title
+        statusMenuLabel?.textColor = color
     }
 
     private static func loadToolbarIcon() -> NSImage? {
@@ -321,7 +349,7 @@ class StatusBarController: NSObject {
         case .processing:
             return "VoiceClutch: Processing"
         case .downloading:
-            return "VoiceClutch: Downloading"
+            return "VoiceClutch: Downloading model"
         case .loadingModel:
             return "VoiceClutch: Loading model"
         }

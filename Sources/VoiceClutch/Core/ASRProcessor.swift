@@ -80,13 +80,14 @@ public actor ASRProcessor {
 
     /// Run a one-time warm-up pass so first user dictation avoids model cold-start latency.
     public func warmUpIfNeeded() async throws {
-        guard isModelLoaded, nemotronManager != nil else {
+        guard isModelLoaded, let manager = nemotronManager else {
             throw ASRError.modelLoadFailed(NSError(domain: "ASRProcessor", code: -1))
         }
 
         guard !hasWarmedUp else { return }
 
-        let warmupSampleCount = Int(Self.streamSampleRate * 1.2)
+        let chunkSamples = await manager.config.chunkSamples
+        let warmupSampleCount = max(chunkSamples, 1)
         let warmupSamples = Array(repeating: Float.zero, count: warmupSampleCount)
 
         do {
