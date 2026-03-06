@@ -141,7 +141,12 @@ public class TextInjector {
     }
 
     public static func updateStreamingPartial(_ text: String) {
-        guard !text.isEmpty else { return }
+        let normalizedText = normalizedStreamingTranscript(text)
+        updateStreamingPartialNormalized(normalizedText)
+    }
+
+    static func updateStreamingPartialNormalized(_ normalizedText: String) {
+        guard !normalizedText.isEmpty else { return }
 
         let previousInjectedText: String
         let now = Date().timeIntervalSince1970
@@ -152,7 +157,7 @@ public class TextInjector {
             stateLock.lock()
         }
 
-        guard streamingState.lastInjectedText != text else {
+        guard streamingState.lastInjectedText != normalizedText else {
             stateLock.unlock()
             return
         }
@@ -162,26 +167,26 @@ public class TextInjector {
         stateLock.unlock()
 
         if previousInjectedText.isEmpty {
-            guard let changeCount = writeToPasteboard(text) else { return }
+            guard let changeCount = writeToPasteboard(normalizedText) else { return }
             simulatePaste()
             stateLock.lock()
             if streamingState.isActive {
-                streamingState.lastInjectedText = text
+                streamingState.lastInjectedText = normalizedText
                 streamingState.lastInjectedChangeCount = changeCount
             }
             stateLock.unlock()
             return
         }
 
-        if text.hasPrefix(previousInjectedText) {
-            let suffix = String(text.dropFirst(previousInjectedText.count))
+        if normalizedText.hasPrefix(previousInjectedText) {
+            let suffix = String(normalizedText.dropFirst(previousInjectedText.count))
             guard !suffix.isEmpty else { return }
             guard let changeCount = writeToPasteboard(suffix) else { return }
             simulatePaste()
 
             stateLock.lock()
             if streamingState.isActive {
-                streamingState.lastInjectedText = text
+                streamingState.lastInjectedText = normalizedText
                 streamingState.lastInjectedChangeCount = changeCount
             }
             stateLock.unlock()
@@ -193,7 +198,7 @@ public class TextInjector {
         }
 
         guard
-            let rewritePlan = liveRewritePlan(from: previousInjectedText, to: text),
+            let rewritePlan = liveRewritePlan(from: previousInjectedText, to: normalizedText),
             rewritePlan.deleteCount <= maxLiveRewriteDeleteCount,
             rewritePlan.replacementSpanCount <= maxLiveRewriteReplacementSpan
         else {
@@ -219,7 +224,7 @@ public class TextInjector {
 
         stateLock.lock()
         if streamingState.isActive {
-            streamingState.lastInjectedText = text
+            streamingState.lastInjectedText = normalizedText
             if let changeCount {
                 streamingState.lastInjectedChangeCount = changeCount
             }
@@ -229,7 +234,12 @@ public class TextInjector {
     }
 
     public static func commitStreamingFinal(_ text: String) {
-        let normalizedFinalText = normalizedStreamingFinalText(text)
+        let normalizedTranscript = normalizedStreamingTranscript(text)
+        commitStreamingFinalNormalized(normalizedTranscript)
+    }
+
+    static func commitStreamingFinalNormalized(_ normalizedTranscript: String) {
+        let normalizedFinalText = finalizedStreamingText(fromNormalizedTranscript: normalizedTranscript)
         let session = takeAndResetStreamingSessionIfActive()
 
         guard let session else {
@@ -283,13 +293,8 @@ public class TextInjector {
         )
     }
 
-    private static func normalizedStreamingFinalText(_ text: String) -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return "" }
-
-        let cleaned = collapsedDuplicatePeriods(in: trimmed)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty, containsSubstantiveContent(cleaned) else { return "" }
+    private static func finalizedStreamingText(fromNormalizedTranscript cleaned: String) -> String {
+        guard !cleaned.isEmpty else { return "" }
 
         if hasTerminalPunctuation(cleaned) {
             return "\(cleaned) "
@@ -297,6 +302,18 @@ public class TextInjector {
 
         let terminal = shouldEndAsQuestion(cleaned) ? "?" : "."
         return "\(cleaned)\(terminal) "
+    }
+
+    public static func normalizedStreamingTranscript(_ text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+
+        let collapsed = collapsedDuplicateSentenceTerminators(in: trimmed)
+        let withoutStandaloneDotTokens = removingStandaloneDotLikeTokens(in: collapsed)
+        let withoutLeadingAttachedNoise = strippingLikelySpuriousLeadingAttachedDotPrefix(in: withoutStandaloneDotTokens)
+        let cleaned = withoutLeadingAttachedNoise.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty, containsSubstantiveContent(cleaned) else { return "" }
+        return cleaned
     }
 
     private struct LiveRewritePlan {
@@ -350,8 +367,18 @@ public class TextInjector {
         )
     }
 
-    private static func collapsedDuplicatePeriods(in text: String) -> String {
-        guard text.contains(".") else { return text }
+    private static let collapsibleSentenceTerminatorScalars: Set<Unicode.Scalar> = [
+        UnicodeScalar(0x002E)!, // .
+        UnicodeScalar(0x003F)!, // ?
+        UnicodeScalar(0x0021)!, // !
+        UnicodeScalar(0x2026)!, // …
+        UnicodeScalar(0x3002)!, // 。
+        UnicodeScalar(0xFF1F)!, // ？
+        UnicodeScalar(0xFF01)!, // ！
+    ]
+
+    private static func collapsedDuplicateSentenceTerminators(in text: String) -> String {
+        guard text.unicodeScalars.contains(where: isCollapsibleSentenceTerminatorScalar) else { return text }
 
         let scalars = Array(text.unicodeScalars)
         var collapsed: [Unicode.Scalar] = []
@@ -359,21 +386,21 @@ public class TextInjector {
 
         while index < scalars.count {
             let current = scalars[index]
-            guard current == "." else {
+            guard isCollapsibleSentenceTerminatorScalar(current) else {
                 collapsed.append(current)
                 index += 1
                 continue
             }
 
-            collapsed.append(".")
+            collapsed.append(current)
 
             var lookahead = index + 1
-            var encounteredDotRun = false
+            var encounteredRepeatedRun = false
             while lookahead < scalars.count {
                 let candidate = scalars[lookahead]
 
-                if candidate == "." {
-                    encounteredDotRun = true
+                if candidate == current {
+                    encounteredRepeatedRun = true
                     lookahead += 1
                     continue
                 }
@@ -386,7 +413,7 @@ public class TextInjector {
                 break
             }
 
-            if encounteredDotRun {
+            if encounteredRepeatedRun {
                 index = lookahead
             } else {
                 index += 1
@@ -394,6 +421,109 @@ public class TextInjector {
         }
 
         return String(String.UnicodeScalarView(collapsed))
+    }
+
+    private static func removingStandaloneDotLikeTokens(in text: String) -> String {
+        let scalars = Array(text.unicodeScalars)
+        guard !scalars.isEmpty else { return text }
+
+        var output: [Unicode.Scalar] = []
+        var index = 0
+        var emittedToken = false
+
+        while index < scalars.count {
+            let separatorStart = index
+            while index < scalars.count, isIgnorablePeriodSeparator(scalars[index]) {
+                index += 1
+            }
+            let separators = scalars[separatorStart..<index]
+
+            guard index < scalars.count else { break }
+
+            let tokenStart = index
+            while index < scalars.count, !isIgnorablePeriodSeparator(scalars[index]) {
+                index += 1
+            }
+            let token = scalars[tokenStart..<index]
+
+            guard !token.allSatisfy(isDotLikePunctuationScalar) else {
+                continue
+            }
+
+            if emittedToken {
+                output.append(contentsOf: separators)
+            }
+            output.append(contentsOf: token)
+            emittedToken = true
+        }
+
+        return String(String.UnicodeScalarView(output))
+    }
+
+    private static func strippingLikelySpuriousLeadingAttachedDotPrefix(in text: String) -> String {
+        let scalars = Array(text.unicodeScalars)
+        guard !scalars.isEmpty else { return text }
+
+        var firstContentIndex = 0
+        while firstContentIndex < scalars.count, isIgnorablePeriodSeparator(scalars[firstContentIndex]) {
+            firstContentIndex += 1
+        }
+
+        guard firstContentIndex < scalars.count, isDotLikePunctuationScalar(scalars[firstContentIndex]) else {
+            return text
+        }
+
+        var afterDotPrefixIndex = firstContentIndex
+        while afterDotPrefixIndex < scalars.count, isDotLikePunctuationScalar(scalars[afterDotPrefixIndex]) {
+            afterDotPrefixIndex += 1
+        }
+        guard afterDotPrefixIndex < scalars.count else { return "" }
+        guard CharacterSet.alphanumerics.contains(scalars[afterDotPrefixIndex]) else {
+            return text
+        }
+
+        var tokenEndIndex = afterDotPrefixIndex
+        while tokenEndIndex < scalars.count, !isIgnorablePeriodSeparator(scalars[tokenEndIndex]) {
+            tokenEndIndex += 1
+        }
+        let firstTokenAfterDots = Array(scalars[afterDotPrefixIndex..<tokenEndIndex])
+
+        if isUppercaseAcronymToken(firstTokenAfterDots) || isDigitOnlyToken(firstTokenAfterDots) {
+            return text
+        }
+
+        return String(String.UnicodeScalarView(scalars[afterDotPrefixIndex..<scalars.count]))
+    }
+
+    private static func isUppercaseAcronymToken(_ token: [Unicode.Scalar]) -> Bool {
+        guard token.count >= 2 else { return false }
+        return token.allSatisfy { scalar in
+            CharacterSet.uppercaseLetters.contains(scalar) || CharacterSet.decimalDigits.contains(scalar)
+        }
+    }
+
+    private static func isDigitOnlyToken(_ token: [Unicode.Scalar]) -> Bool {
+        guard !token.isEmpty else { return false }
+        return token.allSatisfy { CharacterSet.decimalDigits.contains($0) }
+    }
+
+    private static let dotLikePunctuationScalars: Set<Unicode.Scalar> = [
+        UnicodeScalar(0x002E)!, // .
+        UnicodeScalar(0x2026)!, // …
+        UnicodeScalar(0x2024)!, // ․
+        UnicodeScalar(0x2027)!, // ‧
+        UnicodeScalar(0x3002)!, // 。
+        UnicodeScalar(0xFF0E)!, // ．
+        UnicodeScalar(0xFF61)!, // ｡
+        UnicodeScalar(0xFE52)!, // ﹒
+    ]
+
+    private static func isDotLikePunctuationScalar(_ scalar: Unicode.Scalar) -> Bool {
+        dotLikePunctuationScalars.contains(scalar)
+    }
+
+    private static func isCollapsibleSentenceTerminatorScalar(_ scalar: Unicode.Scalar) -> Bool {
+        collapsibleSentenceTerminatorScalars.contains(scalar)
     }
 
     private static func isIgnorablePeriodSeparator(_ scalar: Unicode.Scalar) -> Bool {

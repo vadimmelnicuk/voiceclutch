@@ -96,7 +96,7 @@ public final class DictationController: ObservableObject {
                 guard let self, self.state == .processing, self.isAwaitingFinalResult else { return }
                 self.isAwaitingFinalResult = false
                 let fallbackText = self.latestPartialText
-                TextInjector.commitStreamingFinal(fallbackText)
+                TextInjector.commitStreamingFinalNormalized(fallbackText)
                 self.resetPartialState()
                 self.state = .idle
             }
@@ -132,24 +132,29 @@ public final class DictationController: ObservableObject {
             isAwaitingFinalResult = false
             processingTimeoutTask?.cancel()
             processingTimeoutTask = nil
-            let finalText = containsSubstantiveContent(text) ? text : latestPartialText
-            TextInjector.commitStreamingFinal(finalText)
+            let normalizedFinalText = TextInjector.normalizedStreamingTranscript(text)
+            let finalText = !normalizedFinalText.isEmpty ? normalizedFinalText : latestPartialText
+            TextInjector.commitStreamingFinalNormalized(finalText)
             resetPartialState()
             state = .idle
             return
         }
 
-        guard (state == .recording || state == .processing), !text.isEmpty else {
+        // Ignore post-release partials while processing final ASR output.
+        // This avoids release-tail punctuation churn from rewriting already
+        // injected text; only the final transcript should apply in this phase.
+        guard state == .recording, !text.isEmpty else {
             return
         }
 
-        guard containsSubstantiveContent(text) else {
+        let normalizedPartialText = TextInjector.normalizedStreamingTranscript(text)
+        guard !normalizedPartialText.isEmpty else {
             return
         }
 
-        latestPartialText = text
-        guard shouldInjectPartial(text) else { return }
-        TextInjector.updateStreamingPartial(text)
+        latestPartialText = normalizedPartialText
+        guard shouldInjectPartial(normalizedPartialText) else { return }
+        TextInjector.updateStreamingPartialNormalized(normalizedPartialText)
     }
 
     private func resetPartialState() {
@@ -161,9 +166,5 @@ public final class DictationController: ObservableObject {
         guard text != lastInjectedPartialText else { return false }
         lastInjectedPartialText = text
         return true
-    }
-
-    private func containsSubstantiveContent(_ text: String) -> Bool {
-        text.unicodeScalars.contains { CharacterSet.alphanumerics.contains($0) }
     }
 }
