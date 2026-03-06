@@ -119,8 +119,7 @@ public final class DictationController: ObservableObject {
             isAwaitingFinalResult = false
             processingTimeoutTask?.cancel()
             processingTimeoutTask = nil
-            let candidateFinalText = text.isEmpty ? latestPartialText : text
-            let finalText = containsSubstantiveContent(candidateFinalText) ? candidateFinalText : ""
+            let finalText = containsSubstantiveContent(text) ? text : latestPartialText
             TextInjector.commitStreamingFinal(finalText)
             resetPartialState()
             state = .idle

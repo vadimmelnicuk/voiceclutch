@@ -22,6 +22,7 @@ DerivedData/
 # AI
 .claude/
 CLAUDE.md
+AGENTS.md
 features.md
 
 # VSCode

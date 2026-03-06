@@ -7,8 +7,6 @@ public class TextInjector {
     private static let clipboardRecoveryDelay: TimeInterval = 0.3
     private static let stateLock = NSLock()
     private static let rewriteDisplayInterval: TimeInterval = 0.35
-    private static let duplicatePeriodWithSpacingRegex = try! NSRegularExpression(pattern: "\\.(?:\\s*\\.)+")
-    private static let repeatedPeriodRegex = try! NSRegularExpression(pattern: "\\.{2,}")
     private static let sentenceTerminators: Set<Character> = [".", "!", "?", "…", "。", "！", "？"]
     private static let trailingPunctuationClosers: Set<Character> = ["\"", "'", "”", "’", ")", "]", "}", "»"]
     private static let questionStarterWords: Set<String> = [
@@ -283,25 +281,51 @@ public class TextInjector {
     private static func collapsedDuplicatePeriods(in text: String) -> String {
         guard text.contains(".") else { return text }
 
-        var normalized = text
+        let scalars = Array(text.unicodeScalars)
+        var collapsed: [Unicode.Scalar] = []
+        var index = 0
 
-        let firstPassRange = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
-        normalized = duplicatePeriodWithSpacingRegex.stringByReplacingMatches(
-            in: normalized,
-            options: [],
-            range: firstPassRange,
-            withTemplate: "."
-        )
+        while index < scalars.count {
+            let current = scalars[index]
+            guard current == "." else {
+                collapsed.append(current)
+                index += 1
+                continue
+            }
 
-        let secondPassRange = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
-        normalized = repeatedPeriodRegex.stringByReplacingMatches(
-            in: normalized,
-            options: [],
-            range: secondPassRange,
-            withTemplate: "."
-        )
+            collapsed.append(".")
 
-        return normalized
+            var lookahead = index + 1
+            var encounteredDotRun = false
+            while lookahead < scalars.count {
+                let candidate = scalars[lookahead]
+
+                if candidate == "." {
+                    encounteredDotRun = true
+                    lookahead += 1
+                    continue
+                }
+
+                if isIgnorablePeriodSeparator(candidate) {
+                    lookahead += 1
+                    continue
+                }
+
+                break
+            }
+
+            if encounteredDotRun {
+                index = lookahead
+            } else {
+                index += 1
+            }
+        }
+
+        return String(String.UnicodeScalarView(collapsed))
+    }
+
+    private static func isIgnorablePeriodSeparator(_ scalar: Unicode.Scalar) -> Bool {
+        isIgnorableUnicodeScalar(scalar)
     }
 
     private static func containsSubstantiveContent(_ text: String) -> Bool {
@@ -311,7 +335,7 @@ public class TextInjector {
     private static func hasTerminalPunctuation(_ text: String) -> Bool {
         var probe = text[...]
         while let last = probe.last {
-            if last.isWhitespace || trailingPunctuationClosers.contains(last) {
+            if isIgnorableTerminalCharacter(last) {
                 probe = probe.dropLast()
                 continue
             }
@@ -321,6 +345,30 @@ public class TextInjector {
 
         return false
     }
+
+    private static func isIgnorableTerminalCharacter(_ character: Character) -> Bool {
+        if trailingPunctuationClosers.contains(character) || character.isWhitespace {
+            return true
+        }
+
+        return character.unicodeScalars.allSatisfy {
+            isIgnorableUnicodeScalar($0)
+        }
+    }
+
+    private static func isIgnorableUnicodeScalar(_ scalar: Unicode.Scalar) -> Bool {
+        CharacterSet.whitespacesAndNewlines.contains(scalar)
+        || ignorableUnicodeScalars.contains(scalar)
+    }
+
+    private static let ignorableUnicodeScalars: Set<Unicode.Scalar> = [
+        UnicodeScalar(0x200B)!,
+        UnicodeScalar(0x200C)!,
+        UnicodeScalar(0x200D)!,
+        UnicodeScalar(0x2060)!,
+        UnicodeScalar(0xFEFF)!,
+        UnicodeScalar(0x00A0)!,
+    ]
 
     private static func shouldEndAsQuestion(_ text: String) -> Bool {
         guard let firstWord = text.split(whereSeparator: \.isWhitespace).first else { return false }

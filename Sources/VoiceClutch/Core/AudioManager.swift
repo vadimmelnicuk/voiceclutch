@@ -36,7 +36,7 @@ public class AudioManager: @unchecked Sendable {
     private var silenceThreshold: Float = 0.01
 
     /// Keep recording briefly after key release so fast utterances do not lose their tail.
-    private let postReleaseCaptureDuration: TimeInterval = 0.14
+    private let postReleaseCaptureDuration: TimeInterval = 0.32
 
     /// Add trailing context to help short phrases decode cleanly.
     private let trailingContextPaddingDuration: Double = 0.18
@@ -221,8 +221,8 @@ public class AudioManager: @unchecked Sendable {
         #if DEBUG
         let duration = Double(transcriptionBuffer.count) / targetSampleRate
         print(
-            "\(debugDescription(for: detection, threshold: silenceThreshold, label: "SPEECH"))," +
-            " processing \(String(format: "%.2f", duration))s with ASR"
+            "\(debugDescription(for: detection, threshold: silenceThreshold, label: "SPEECH")) " +
+            "| \(String(format: "%.2f", duration))s ASR"
         )
         #endif
 
@@ -505,18 +505,13 @@ public class AudioManager: @unchecked Sendable {
         label: String
     ) -> String {
         let windowThreshold = threshold * windowThresholdMultiplier
-        let peakDiagnosticReferenceThreshold = threshold * 6.0
 
         return
-            "🎤 RMS: \(String(format: "%.4f", detection.rmsEnergy))" +
-            " (threshold: \(String(format: "%.4f", threshold)))," +
-            " peak: \(String(format: "%.4f", detection.peakAmplitude))" +
-            " (diagnostic threshold: \(String(format: "%.4f", peakDiagnosticReferenceThreshold)))," +
-            " maxWindowRMS: \(String(format: "%.4f", detection.maxWindowRms))" +
-            " (threshold: \(String(format: "%.4f", windowThreshold)))" +
-            ", windowRun: \(detection.longestWindowRun)" +
-            " (required: \(requiredConsecutiveSpeechWindows))" +
-            " - \(label) via \(detection.trigger)"
+            "🎤 \(label) via \(detection.trigger) " +
+            "rms=\(String(format: "%.4f", detection.rmsEnergy))/\(String(format: "%.4f", threshold)) " +
+            "peak=\(String(format: "%.4f", detection.peakAmplitude)) " +
+            "maxWindowRMS=\(String(format: "%.4f", detection.maxWindowRms))/\(String(format: "%.4f", windowThreshold)) " +
+            "windowRun=\(detection.longestWindowRun)/\(requiredConsecutiveSpeechWindows)"
     }
 
     private func stopAudioEngine() {
