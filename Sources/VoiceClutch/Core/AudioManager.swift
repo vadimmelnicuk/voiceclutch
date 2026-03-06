@@ -15,8 +15,10 @@ public class AudioManager: @unchecked Sendable {
     private let stateLock = NSLock()
     private var isRecording = false
 
-    /// Serial queue for streaming ASR ingest operations.
-    private let streamingQueue = DispatchQueue(label: "dev.vm.voiceclutch.audio.streaming")
+    /// Serial chain for async ASR operations (ingest/finish/reset).
+    private let streamingOperationLock = NSLock()
+    private var streamingOperationTail: Task<Void, Never>?
+    private var streamingOperationGeneration: UInt64 = 0
     /// Samples waiting to be sent to the ASR stream.
     private var pendingStreamingSamples: [Float] = []
 
@@ -36,7 +38,7 @@ public class AudioManager: @unchecked Sendable {
     private var silenceThreshold: Float = 0.01
 
     /// Keep recording briefly after key release so fast utterances do not lose their tail.
-    private let postReleaseCaptureDuration: TimeInterval = 0.32
+    private let postReleaseCaptureDuration: TimeInterval = 0.24
 
     /// Add trailing context to help short phrases decode cleanly.
     private let trailingContextPaddingDuration: Double = 0.18
@@ -82,6 +84,8 @@ public class AudioManager: @unchecked Sendable {
             throw AudioError.alreadyRecording
         }
 
+        StreamingMetrics.shared.resetForSession()
+
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
@@ -100,8 +104,15 @@ public class AudioManager: @unchecked Sendable {
         }
 
         withStateLock {
-            audioBuffer.removeAll()
+            audioBuffer.removeAll(keepingCapacity: true)
+            let maxBufferSize = Int(targetSampleRate * maxRecordingDuration)
+            if audioBuffer.capacity < maxBufferSize {
+                audioBuffer.reserveCapacity(maxBufferSize)
+            }
             pendingStreamingSamples.removeAll(keepingCapacity: true)
+            if pendingStreamingSamples.capacity < (streamingIngestChunkSize * 4) {
+                pendingStreamingSamples.reserveCapacity(streamingIngestChunkSize * 4)
+            }
             isFinalizingRecording = false
             onTranscription = callback
         }
@@ -110,7 +121,7 @@ public class AudioManager: @unchecked Sendable {
             try beginStreamingSession(callback: callback)
         } catch {
             withStateLock {
-                audioBuffer.removeAll()
+                audioBuffer.removeAll(keepingCapacity: true)
                 pendingStreamingSamples.removeAll(keepingCapacity: true)
                 onTranscription = nil
             }
@@ -135,7 +146,7 @@ public class AudioManager: @unchecked Sendable {
             }
         } catch {
             withStateLock {
-                audioBuffer.removeAll()
+                audioBuffer.removeAll(keepingCapacity: true)
                 pendingStreamingSamples.removeAll(keepingCapacity: true)
                 onTranscription = nil
             }
@@ -157,6 +168,8 @@ public class AudioManager: @unchecked Sendable {
 
         guard shouldFinalize else { return }
 
+        StreamingMetrics.shared.markStopRequested()
+
         DispatchQueue.main.asyncAfter(deadline: .now() + postReleaseCaptureDuration) { [weak self] in
             self?.finalizeRecording()
         }
@@ -170,7 +183,7 @@ public class AudioManager: @unchecked Sendable {
 
             isFinalizingRecording = false
             isRecording = false
-            audioBuffer.removeAll()
+            audioBuffer.removeAll(keepingCapacity: true)
             pendingStreamingSamples.removeAll(keepingCapacity: true)
             onTranscription = nil
             return true
@@ -194,7 +207,7 @@ public class AudioManager: @unchecked Sendable {
             let callback = onTranscription
             isRecording = false
             isFinalizingRecording = false
-            audioBuffer.removeAll()
+            audioBuffer.removeAll(keepingCapacity: true)
             onTranscription = nil
             return (bufferedAudio, callback)
         }
@@ -206,63 +219,68 @@ public class AudioManager: @unchecked Sendable {
         stopAudioEngine()
 
         let detection = detectSpeech(finalizationState.bufferedAudio, threshold: silenceThreshold)
-        let transcriptionBuffer = prepareBufferForTranscription(
+        let preparation = prepareTranscription(
             finalizationState.bufferedAudio,
             detection: detection
         )
 
         // If silence, clear streaming session and emit empty final so injected partials are removed.
-        if transcriptionBuffer.isEmpty {
+        if !preparation.shouldTranscribe {
             resetStreamingSession()
+            StreamingMetrics.shared.markFinalDelivered()
             finalizationState.callback?("", true)
             return
         }
 
         #if DEBUG
-        let duration = Double(transcriptionBuffer.count) / targetSampleRate
         print(
             "\(debugDescription(for: detection, threshold: silenceThreshold, label: "SPEECH")) " +
-            "| \(String(format: "%.2f", duration))s ASR"
+            "| \(String(format: "%.2f", preparation.transcriptionDurationSeconds))s ASR"
         )
         #endif
 
         guard let asrProcessor else {
+            StreamingMetrics.shared.markFinalDelivered()
             finalizationState.callback?("", true)
             return
         }
 
-        let additionalSampleCount = max(0, transcriptionBuffer.count - finalizationState.bufferedAudio.count)
-        let additionalSamples = additionalSampleCount > 0
-            ? Array(transcriptionBuffer.suffix(additionalSampleCount))
+        let additionalSamples = preparation.additionalSampleCount > 0
+            ? Array(repeating: Float.zero, count: preparation.additionalSampleCount)
             : []
 
-        streamingQueue.async { [weak self] in
+        enqueueStreamingOperation { [weak self] in
             guard let self else { return }
 
             let pendingSamples = self.consumePendingStreamingSamples()
-            let finalSamples = pendingSamples + additionalSamples
-
-            if !finalSamples.isEmpty {
+            if !pendingSamples.isEmpty {
+                StreamingMetrics.shared.incrementIngestChunks()
                 do {
-                    try self.runAsyncOperation {
-                        try await asrProcessor.ingest(samples: finalSamples)
-                    }
+                    try await asrProcessor.ingest(samples: pendingSamples)
                 } catch {
                     print("❌ ASR final ingest failed: \(error)")
                 }
             }
 
+            if !additionalSamples.isEmpty {
+                StreamingMetrics.shared.incrementIngestChunks()
+                do {
+                    try await asrProcessor.ingest(samples: additionalSamples)
+                } catch {
+                    print("❌ ASR trailing ingest failed: \(error)")
+                }
+            }
+
             let transcription: String
             do {
-                transcription = try self.runAsyncOperation {
-                    try await asrProcessor.finishStreaming()
-                }
+                transcription = try await asrProcessor.finishStreaming()
             } catch {
                 print("❌ ASR finish failed: \(error)")
                 transcription = ""
             }
 
-            DispatchQueue.main.async {
+            await MainActor.run {
+                StreamingMetrics.shared.markFinalDelivered()
                 finalizationState.callback?(transcription, true)
             }
         }
@@ -274,6 +292,8 @@ public class AudioManager: @unchecked Sendable {
         converter: AVAudioConverter,
         targetFormat: AVAudioFormat
     ) {
+        let tapCallbackStartUptime = ProcessInfo.processInfo.systemUptime
+
         guard buffer.frameLength > 0 else {
             return
         }
@@ -308,9 +328,12 @@ public class AudioManager: @unchecked Sendable {
         }
 
         let frameLength = Int(convertedBuffer.frameLength)
-        let samples = UnsafeBufferPointer(start: data, count: frameLength).map { sample in
-            let amplifiedSample = sample * microphoneGain
-            return max(-1.0, min(1.0, amplifiedSample))
+        let samples = Array<Float>(unsafeUninitializedCapacity: frameLength) { initializedBuffer, initializedCount in
+            for sampleIndex in 0..<frameLength {
+                let amplifiedSample = data[sampleIndex] * microphoneGain
+                initializedBuffer[sampleIndex] = max(-1.0, min(1.0, amplifiedSample))
+            }
+            initializedCount = frameLength
         }
 
         var shouldStream = false
@@ -329,6 +352,11 @@ public class AudioManager: @unchecked Sendable {
 
         if shouldStream {
             enqueueStreamingSamples(samples)
+            let durationMs = max(
+                0,
+                (ProcessInfo.processInfo.systemUptime - tapCallbackStartUptime) * 1_000
+            )
+            StreamingMetrics.shared.recordTapToIngestEnqueue(durationMs: durationMs)
         }
     }
 
@@ -357,20 +385,18 @@ public class AudioManager: @unchecked Sendable {
                 return nil
             }
 
-            let readySamples = pendingStreamingSamples
-            pendingStreamingSamples.removeAll(keepingCapacity: true)
+            var readySamples: [Float] = []
+            readySamples.reserveCapacity(pendingStreamingSamples.count)
+            swap(&readySamples, &pendingStreamingSamples)
             return readySamples
         }
 
         guard let chunk else { return }
 
-        streamingQueue.async { [weak self] in
-            guard let self else { return }
-
+        StreamingMetrics.shared.incrementIngestChunks()
+        enqueueStreamingOperation {
             do {
-                try self.runAsyncOperation {
-                    try await asrProcessor.ingest(samples: chunk)
-                }
+                try await asrProcessor.ingest(samples: chunk)
             } catch {
                 print("❌ ASR ingest failed: \(error)")
             }
@@ -384,12 +410,8 @@ public class AudioManager: @unchecked Sendable {
 
         guard let asrProcessor else { return }
 
-        streamingQueue.async { [weak self] in
-            guard let self else { return }
-            _ = try? self.runAsyncOperation {
-                await asrProcessor.resetStreaming()
-                return ()
-            }
+        enqueueStreamingOperation {
+            await asrProcessor.resetStreaming()
         }
     }
 
@@ -399,10 +421,37 @@ public class AudioManager: @unchecked Sendable {
                 return []
             }
 
-            let pending = pendingStreamingSamples
-            pendingStreamingSamples.removeAll(keepingCapacity: true)
+            var pending: [Float] = []
+            pending.reserveCapacity(pendingStreamingSamples.count)
+            swap(&pending, &pendingStreamingSamples)
             return pending
         }
+    }
+
+    private func enqueueStreamingOperation(_ operation: @escaping @Sendable () async -> Void) {
+        streamingOperationLock.lock()
+        let previousTask = streamingOperationTail
+        streamingOperationGeneration &+= 1
+        let generation = streamingOperationGeneration
+        let nextTask = Task {
+            if let previousTask {
+                _ = await previousTask.result
+            }
+            await operation()
+            self.withStreamingOperationLock {
+                if self.streamingOperationGeneration == generation {
+                    self.streamingOperationTail = nil
+                }
+            }
+        }
+        streamingOperationTail = nextTask
+        streamingOperationLock.unlock()
+    }
+
+    private func withStreamingOperationLock<T>(_ operation: () -> T) -> T {
+        streamingOperationLock.lock()
+        defer { streamingOperationLock.unlock() }
+        return operation()
     }
 
     private func runAsyncOperation<T>(
@@ -460,31 +509,44 @@ public class AudioManager: @unchecked Sendable {
         withStateLock { isRecording }
     }
 
+    public func getStreamingMetricsSnapshot() -> StreamingMetricsSnapshot {
+        StreamingMetrics.shared.snapshot()
+    }
+
     // MARK: - Silence Detection
 
-    private func prepareBufferForTranscription(
+    private struct TranscriptionPreparation {
+        let shouldTranscribe: Bool
+        let additionalSampleCount: Int
+        let transcriptionDurationSeconds: Double
+    }
+
+    private func prepareTranscription(
         _ buffer: [Float],
         detection: SpeechDetectionResult
-    ) -> [Float] {
+    ) -> TranscriptionPreparation {
         guard detection.containsSpeech else {
-            return []
-        }
-
-        var preparedBuffer = buffer
-        let trailingPadding = Array(
-            repeating: Float.zero,
-            count: Int(targetSampleRate * trailingContextPaddingDuration)
-        )
-        preparedBuffer.append(contentsOf: trailingPadding)
-
-        let minimumSampleCount = Int(targetSampleRate * minimumTranscriptionDuration)
-        if preparedBuffer.count < minimumSampleCount {
-            preparedBuffer.append(
-                contentsOf: Array(repeating: Float.zero, count: minimumSampleCount - preparedBuffer.count)
+            return TranscriptionPreparation(
+                shouldTranscribe: false,
+                additionalSampleCount: 0,
+                transcriptionDurationSeconds: 0
             )
         }
 
-        return preparedBuffer
+        let baseSampleCount = buffer.count
+        let trailingPaddingSampleCount = Int(targetSampleRate * trailingContextPaddingDuration)
+        var totalSampleCount = baseSampleCount + trailingPaddingSampleCount
+
+        let minimumSampleCount = Int(targetSampleRate * minimumTranscriptionDuration)
+        if totalSampleCount < minimumSampleCount {
+            totalSampleCount = minimumSampleCount
+        }
+
+        return TranscriptionPreparation(
+            shouldTranscribe: true,
+            additionalSampleCount: max(0, totalSampleCount - baseSampleCount),
+            transcriptionDurationSeconds: Double(totalSampleCount) / targetSampleRate
+        )
     }
 
     private func detectSpeech(_ buffer: [Float], threshold: Float) -> SpeechDetectionResult {

@@ -7,6 +7,7 @@ class StatusBarController: NSObject {
     private var menu: NSMenu
     private var statusMenuItem: NSMenuItem?
     private weak var statusMenuLabel: NSTextField?
+    private weak var statusMenuIndicator: NSView?
     private let preferencesWindowController: PreferencesWindowController
     private let toolbarIcon: NSImage?
     private let activeListeningToolbarIcon: NSImage?
@@ -113,16 +114,16 @@ class StatusBarController: NSObject {
             color = .systemGreen
         case .recording:
             title = "Recording"
-            color = .labelColor
+            color = NSColor(srgbRed: 1.0, green: 0.6, blue: 0.0, alpha: 1.0)
         case .processing:
             title = "Processing"
-            color = .labelColor
+            color = .systemBlue
         case .downloading:
             title = "Downloading model"
-            color = NSColor(srgbRed: 1.0, green: 0.6, blue: 0.0, alpha: 1.0)
+            color = .systemGray
         case .loadingModel:
             title = "Loading model"
-            color = NSColor(srgbRed: 1.0, green: 0.6, blue: 0.0, alpha: 1.0)
+            color = .systemGray
         }
 
         setStatusMenuLabel(title: title, color: color)
@@ -130,8 +131,7 @@ class StatusBarController: NSObject {
 
     func updateDownloadProgress(_ progress: Double) {
         let progressPercent = Int(progress * 100)
-        let orange = NSColor(srgbRed: 1.0, green: 0.6, blue: 0.0, alpha: 1.0)
-        setStatusMenuLabel(title: "Downloading model \(progressPercent)%", color: orange)
+        setStatusMenuLabel(title: "Downloading model \(progressPercent)%", color: .systemGray)
     }
 
     func showToolbarNotification(_ message: String, duration: TimeInterval = 3.0) {
@@ -206,32 +206,45 @@ class StatusBarController: NSObject {
     }
 
     private func makeStatusMenuItemView(title: String, color: NSColor) -> NSView {
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: 170, height: 22))
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 210, height: 22))
         container.translatesAutoresizingMaskIntoConstraints = false
+
+        let indicator = NSView()
+        indicator.wantsLayer = true
+        indicator.layer?.cornerRadius = 4
+        indicator.layer?.backgroundColor = color.cgColor
+        indicator.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(indicator)
 
         let label = NSTextField(labelWithString: title)
         label.font = NSFont.menuFont(ofSize: NSFont.systemFontSize)
-        label.textColor = color
+        label.textColor = .labelColor
         label.lineBreakMode = .byTruncatingTail
         label.translatesAutoresizingMaskIntoConstraints = false
         container.addSubview(label)
 
         NSLayoutConstraint.activate([
-            container.widthAnchor.constraint(equalToConstant: 170),
+            container.widthAnchor.constraint(equalToConstant: 210),
             container.heightAnchor.constraint(equalToConstant: 22),
-            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            indicator.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+            indicator.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            indicator.widthAnchor.constraint(equalToConstant: 8),
+            indicator.heightAnchor.constraint(equalToConstant: 8),
+            label.leadingAnchor.constraint(equalTo: indicator.trailingAnchor, constant: 8),
             label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -8),
             label.centerYAnchor.constraint(equalTo: container.centerYAnchor),
         ])
 
         statusMenuLabel = label
+        statusMenuIndicator = indicator
         return container
     }
 
     private func setStatusMenuLabel(title: String, color: NSColor) {
         statusMenuItem?.title = title
         statusMenuLabel?.stringValue = title
-        statusMenuLabel?.textColor = color
+        statusMenuLabel?.textColor = .labelColor
+        statusMenuIndicator?.layer?.backgroundColor = color.cgColor
     }
 
     private static func loadToolbarIcon() -> NSImage? {
@@ -248,11 +261,13 @@ class StatusBarController: NSObject {
             .deletingLastPathComponent()
             .deletingLastPathComponent()
         let searchDirectories: [URL?] = [
-            Bundle.main.resourceURL?.appendingPathComponent("Assets", isDirectory: true),
+            Bundle.main.resourceURL,
             URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
-                .appendingPathComponent("Assets", isDirectory: true),
-            executableDirectory.appendingPathComponent("Assets", isDirectory: true),
-            projectRootFromBuildOutput.appendingPathComponent("Assets", isDirectory: true),
+                .appendingPathComponent("Resources", isDirectory: true),
+            executableDirectory
+                .appendingPathComponent("Resources", isDirectory: true),
+            projectRootFromBuildOutput
+                .appendingPathComponent("Resources", isDirectory: true),
         ]
 
         for directory in searchDirectories.compactMap({ $0 }) {

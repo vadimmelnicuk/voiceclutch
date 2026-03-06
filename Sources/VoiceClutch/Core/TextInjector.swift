@@ -6,7 +6,9 @@ import Foundation
 public class TextInjector {
     private static let clipboardRecoveryDelay: TimeInterval = 0.3
     private static let stateLock = NSLock()
-    private static let rewriteDisplayInterval: TimeInterval = 0.35
+    private static let rewriteDisplayInterval: TimeInterval = 0.24
+    private static let maxLiveRewriteDeleteCount = 12
+    private static let maxLiveRewriteReplacementSpan = 48
     private static let sentenceTerminators: Set<Character> = [".", "!", "?", "…", "。", "！", "？"]
     private static let trailingPunctuationClosers: Set<Character> = ["\"", "'", "”", "’", ")", "]", "}", "»"]
     private static let questionStarterWords: Set<String> = [
@@ -186,22 +188,41 @@ public class TextInjector {
             return
         }
 
-        if previousInjectedText.hasPrefix(text) {
-            return
-        }
-
         guard now - lastRewriteDisplayTime >= rewriteDisplayInterval else {
             return
         }
 
-        guard let changeCount = writeToPasteboard(text) else { return }
-        deleteRecentlyInsertedText(characterCount: previousInjectedText.count)
-        simulatePaste()
+        guard
+            let rewritePlan = liveRewritePlan(from: previousInjectedText, to: text),
+            rewritePlan.deleteCount <= maxLiveRewriteDeleteCount,
+            rewritePlan.replacementSpanCount <= maxLiveRewriteReplacementSpan
+        else {
+            return
+        }
+
+        let changeCount: Int?
+        if rewritePlan.replacementText.isEmpty {
+            changeCount = nil
+        } else {
+            guard let currentChangeCount = writeToPasteboard(rewritePlan.replacementText) else { return }
+            changeCount = currentChangeCount
+        }
+
+        if rewritePlan.deleteCount > 0 {
+            deleteRecentlyInsertedText(characterCount: rewritePlan.deleteCount)
+        }
+        if !rewritePlan.replacementText.isEmpty {
+            simulatePaste()
+        }
+
+        StreamingMetrics.shared.incrementRewriteCount()
 
         stateLock.lock()
         if streamingState.isActive {
             streamingState.lastInjectedText = text
-            streamingState.lastInjectedChangeCount = changeCount
+            if let changeCount {
+                streamingState.lastInjectedChangeCount = changeCount
+            }
             streamingState.lastRewriteDisplayTime = now
         }
         stateLock.unlock()
@@ -276,6 +297,57 @@ public class TextInjector {
 
         let terminal = shouldEndAsQuestion(cleaned) ? "?" : "."
         return "\(cleaned)\(terminal) "
+    }
+
+    private struct LiveRewritePlan {
+        let deleteCount: Int
+        let replacementText: String
+        let replacementSpanCount: Int
+    }
+
+    private static func liveRewritePlan(from previousText: String, to nextText: String) -> LiveRewritePlan? {
+        guard previousText != nextText else {
+            return nil
+        }
+
+        let previousCount = previousText.count
+        let nextCount = nextText.count
+
+        var previousPrefixIndex = previousText.startIndex
+        var nextPrefixIndex = nextText.startIndex
+        while previousPrefixIndex < previousText.endIndex,
+              nextPrefixIndex < nextText.endIndex,
+              previousText[previousPrefixIndex] == nextText[nextPrefixIndex] {
+            previousPrefixIndex = previousText.index(after: previousPrefixIndex)
+            nextPrefixIndex = nextText.index(after: nextPrefixIndex)
+        }
+
+        var previousSuffixIndex = previousText.endIndex
+        var nextSuffixIndex = nextText.endIndex
+        while previousSuffixIndex > previousPrefixIndex,
+              nextSuffixIndex > nextPrefixIndex {
+            let previousCandidate = previousText.index(before: previousSuffixIndex)
+            let nextCandidate = nextText.index(before: nextSuffixIndex)
+            guard previousText[previousCandidate] == nextText[nextCandidate] else { break }
+            previousSuffixIndex = previousCandidate
+            nextSuffixIndex = nextCandidate
+        }
+
+        let prefixCount = previousText.distance(from: previousText.startIndex, to: previousPrefixIndex)
+        let suffixCount = previousText.distance(from: previousSuffixIndex, to: previousText.endIndex)
+        let deleteCount = previousCount - prefixCount
+        let replacementText = String(nextText[nextPrefixIndex..<nextText.endIndex])
+        let replacementSpanCount = max(0, nextCount - prefixCount - suffixCount)
+
+        guard deleteCount > 0 || replacementSpanCount > 0 else {
+            return nil
+        }
+
+        return LiveRewritePlan(
+            deleteCount: deleteCount,
+            replacementText: replacementText,
+            replacementSpanCount: replacementSpanCount
+        )
     }
 
     private static func collapsedDuplicatePeriods(in text: String) -> String {

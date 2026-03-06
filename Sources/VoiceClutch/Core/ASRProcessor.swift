@@ -47,7 +47,7 @@ public actor ASRProcessor {
     /// Partial callback throttling interval.
     /// Keep low to improve perceived streaming responsiveness while still
     /// coalescing callback bursts from the ASR engine.
-    private let partialThrottleInterval: TimeInterval = 0.08
+    private let partialThrottleInterval: TimeInterval = 0.06
 
     private var partialHandler: (@Sendable (String) -> Void)?
     private var lastPartialEmitTime: TimeInterval = 0
@@ -202,7 +202,13 @@ public actor ASRProcessor {
     }
 
     private func handlePartial(_ text: String) async {
-        guard !text.isEmpty, text != lastEmittedPartial else {
+        guard !text.isEmpty else {
+            return
+        }
+
+        StreamingMetrics.shared.incrementPartialsReceived()
+
+        guard text != lastEmittedPartial else {
             return
         }
 
@@ -215,6 +221,7 @@ public actor ASRProcessor {
             pendingPartial = nil
             lastPartialEmitTime = now
             lastEmittedPartial = text
+            StreamingMetrics.shared.incrementPartialsEmitted()
             partialHandler?(text)
             return
         }
@@ -249,6 +256,7 @@ public actor ASRProcessor {
 
         lastEmittedPartial = text
         lastPartialEmitTime = Date().timeIntervalSince1970
+        StreamingMetrics.shared.incrementPartialsEmitted()
         partialHandler?(text)
     }
 

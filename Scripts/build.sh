@@ -76,17 +76,20 @@ else
 fi
 
 # Copy toolbar icon assets
-if [ -d "Assets" ]; then
-    cp -R "Assets" "${APP_BUNDLE}/Contents/Resources/"
-else
-    echo "⚠️  Warning: Assets folder not found"
-fi
+ICON_FILES=("logo@1x.png" "logo@2x.png" "logo@3x.png")
+for icon_file in "${ICON_FILES[@]}"; do
+    if [ -f "Resources/${icon_file}" ]; then
+        cp "Resources/${icon_file}" "${APP_BUNDLE}/Contents/Resources/${icon_file}"
+    else
+        echo "⚠️  Warning: Toolbar icon asset not found (Resources/${icon_file})"
+    fi
+done
 
 # Copy app icon
-if [ -f "Assets/VoiceClutch.png" ]; then
-    cp "Assets/VoiceClutch.png" "${APP_BUNDLE}/Contents/Resources/VoiceClutch.png"
+if [ -f "Resources/VoiceClutch.png" ]; then
+    cp "Resources/VoiceClutch.png" "${APP_BUNDLE}/Contents/Resources/VoiceClutch.png"
 else
-    echo "⚠️  Warning: App icon source file not found (Assets/VoiceClutch.png)"
+    echo "⚠️  Warning: App icon source file not found (Resources/VoiceClutch.png)"
 fi
 
 echo "✅ Build successful!"
