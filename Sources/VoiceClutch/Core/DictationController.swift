@@ -113,6 +113,19 @@ public final class DictationController: ObservableObject {
         state = .idle
     }
 
+    @discardableResult
+    func compactMemoryIfIdle() -> Bool {
+        guard state == .idle, !isAwaitingFinalResult else {
+            return false
+        }
+
+        processingTimeoutTask?.cancel()
+        processingTimeoutTask = nil
+        resetPartialState()
+        TextInjector.cancelStreamingSession()
+        return bootstrapper.compactMemoryIfIdle()
+    }
+
     private func handleTranscriptionResult(_ text: String, isFinal: Bool) {
         if isFinal {
             guard isAwaitingFinalResult else { return }

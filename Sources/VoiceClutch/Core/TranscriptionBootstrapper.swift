@@ -72,6 +72,11 @@ public final class TranscriptionBootstrapper: ObservableObject {
         transcriptionSession.stopRecording()
     }
 
+    @discardableResult
+    public func compactMemoryIfIdle() -> Bool {
+        transcriptionSession.compactMemoryIfIdle()
+    }
+
     public func shutdown() {
         transcriptionSession.shutdown()
     }

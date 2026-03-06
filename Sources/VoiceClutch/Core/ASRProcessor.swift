@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreML
 import Foundation
 import FluidAudio
 
@@ -67,7 +68,11 @@ public actor ASRProcessor {
 
         do {
             let modelDir = ModelDownloadManager.asrModelDirectory
-            let manager = NemotronStreamingAsrManager()
+            let modelConfiguration = MLModelConfiguration()
+            modelConfiguration.computeUnits = .cpuAndNeuralEngine
+            modelConfiguration.allowLowPrecisionAccumulationOnGPU = true
+
+            let manager = NemotronStreamingAsrManager(configuration: modelConfiguration)
             try await manager.loadModels(modelDir: modelDir)
 
             nemotronManager = manager

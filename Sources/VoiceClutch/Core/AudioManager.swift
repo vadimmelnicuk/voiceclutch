@@ -504,6 +504,26 @@ public class AudioManager: @unchecked Sendable {
         }
     }
 
+    @discardableResult
+    public func compactMemoryIfIdle() -> Bool {
+        let canCompact = withStateLock { () -> Bool in
+            guard !isRecording, !isFinalizingRecording else {
+                return false
+            }
+
+            audioBuffer.removeAll(keepingCapacity: false)
+            pendingStreamingSamples.removeAll(keepingCapacity: false)
+            return true
+        }
+
+        guard canCompact else {
+            return false
+        }
+
+        resetStreamingSession()
+        return true
+    }
+
     /// Check if currently recording.
     public func isCurrentlyRecording() -> Bool {
         withStateLock { isRecording }

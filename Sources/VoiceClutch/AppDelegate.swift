@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Dispatch
 
 // Import core components
 @preconcurrency import AVFoundation
@@ -17,6 +18,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusBarController: StatusBarController?
     private var currentListeningShortcut = ListeningShortcut.load()
     private var permissionCheckTimer: Timer?
+    private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var isListeningHotkeyHeld = false
 
     // MARK: - Lifecycle
@@ -27,6 +29,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusBar()
         setupDictationController()
         setupStateObserving()
+        setupMemoryPressureMonitoring()
 
         // Check accessibility permissions - this will start the permission checking loop
         Task {
@@ -115,6 +118,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.unregister()
         permissionCheckTimer?.invalidate()
         permissionCheckTimer = nil
+        memoryPressureSource?.cancel()
+        memoryPressureSource = nil
         resumeMediaIfNeeded()
         dictationController.shutdown()
     }
@@ -184,6 +189,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.statusBarController?.updateMenu(for: state)
             }
             .store(in: &cancellables)
+    }
+
+    private func setupMemoryPressureMonitoring() {
+        let source = DispatchSource.makeMemoryPressureSource(
+            eventMask: [.warning, .critical],
+            queue: DispatchQueue.global(qos: .utility)
+        )
+
+        source.setEventHandler { [weak self] in
+            Task { @MainActor in
+                self?.handleMemoryPressureEvent()
+            }
+        }
+
+        source.resume()
+        memoryPressureSource = source
+    }
+
+    private func handleMemoryPressureEvent() {
+        guard let eventMask = memoryPressureSource?.data else { return }
+        guard eventMask.contains(.warning) || eventMask.contains(.critical) else { return }
+        _ = dictationController.compactMemoryIfIdle()
     }
 
     // MARK: - Accessibility Permissions

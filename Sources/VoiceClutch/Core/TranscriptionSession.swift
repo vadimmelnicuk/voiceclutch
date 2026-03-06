@@ -91,6 +91,11 @@ final class TranscriptionSession {
         audioManager.stopRecording()
     }
 
+    @discardableResult
+    func compactMemoryIfIdle() -> Bool {
+        audioManager.compactMemoryIfIdle()
+    }
+
     func shutdown() {
         audioManager.cancelRecording()
         let processor = asrProcessor
