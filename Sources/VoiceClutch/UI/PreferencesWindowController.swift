@@ -4,7 +4,7 @@ import AppKit
 class PreferencesWindowController: NSWindowController {
     private enum Layout {
         static let contentWidth: CGFloat = 520
-        static let contentHeight: CGFloat = 320
+        static let contentHeight: CGFloat = 372
         static let rowHeight: CGFloat = 52
         static let tallRowHeight: CGFloat = 64
     }
@@ -13,6 +13,7 @@ class PreferencesWindowController: NSWindowController {
     private let shortcutPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let clipboardRecoverySwitch = NSSwitch(frame: .zero)
     private let mediaPauseSwitch = NSSwitch(frame: .zero)
+    private let microphoneChimeSwitch = NSSwitch(frame: .zero)
 
     init(onShortcutChanged: @escaping @MainActor (ListeningShortcut) -> Void) {
         self.onShortcutChanged = onShortcutChanged
@@ -65,8 +66,8 @@ class PreferencesWindowController: NSWindowController {
         shortcutPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
 
         let shortcutRow = makeSettingsRow(
-            title: "Push-to-talk shortcut",
-            detail: "Choose which key starts recording when held.",
+            title: "Hold-to-talk shortcut",
+            detail: "Choose which key triggers listening when held.",
             control: shortcutPopup
         )
 
@@ -75,7 +76,7 @@ class PreferencesWindowController: NSWindowController {
 
         let clipboardRecoveryRow = makeSettingsRow(
             title: "Clipboard recovery",
-            detail: "Restore your previous clipboard contents after dictation pastes text.",
+            detail: "Restore your previous clipboard contents after dictation ends.",
             control: clipboardRecoverySwitch
         )
 
@@ -84,16 +85,25 @@ class PreferencesWindowController: NSWindowController {
 
         let mediaPauseRow = makeSettingsRow(
             title: "Pause media while listening",
-            detail: "Pause the active macOS media source when dictation starts, then resume it when you release the key.",
+            detail: "Pause an active macOS media source when dictation starts, then resume on key release.",
             control: mediaPauseSwitch,
             minimumHeight: Layout.tallRowHeight
+        )
+
+        configureToggle(microphoneChimeSwitch, action: #selector(microphoneChimePreferenceChanged(_:)))
+        syncMicrophoneChimePreference()
+
+        let microphoneChimeRow = makeSettingsRow(
+            title: "Play microphone chimes",
+            detail: "Play native microphone start/stop chimes when the hold-to-talk key is pressed and released.",
+            control: microphoneChimeSwitch
         )
 
         let updateButton = NSButton(title: "Check Now…", target: self, action: #selector(checkForUpdates))
         updateButton.bezelStyle = .rounded
         let updateRow = makeSettingsRow(
-            title: "Software Update",
-            detail: "Check for new VoiceClutch releases manually.",
+            title: "Software update",
+            detail: "Check for new VoiceClutch releases.",
             control: updateButton,
             showsSeparator: false
         )
@@ -102,6 +112,7 @@ class PreferencesWindowController: NSWindowController {
             shortcutRow,
             clipboardRecoveryRow,
             mediaPauseRow,
+            microphoneChimeRow,
             updateRow
         ])
         rowsStack.orientation = .vertical
@@ -251,6 +262,10 @@ class PreferencesWindowController: NSWindowController {
         mediaPauseSwitch.state = ListeningMediaPreference.load() ? .on : .off
     }
 
+    private func syncMicrophoneChimePreference() {
+        microphoneChimeSwitch.state = MicrophoneChimePreference.load() ? .on : .off
+    }
+
     @objc private func shortcutChanged(_ sender: NSPopUpButton) {
         guard
             let selectedItem = sender.selectedItem,
@@ -273,6 +288,10 @@ class PreferencesWindowController: NSWindowController {
         ListeningMediaPreference.save(sender.state == .on)
     }
 
+    @objc private func microphoneChimePreferenceChanged(_ sender: NSSwitch) {
+        MicrophoneChimePreference.save(sender.state == .on)
+    }
+
     @objc private func checkForUpdates() {
         guard let window = window else { return }
 
@@ -292,6 +311,7 @@ class PreferencesWindowController: NSWindowController {
         syncShortcutSelection()
         syncClipboardRecoveryPreference()
         syncMediaPausePreference()
+        syncMicrophoneChimePreference()
         enforceFixedWindowFrame()
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

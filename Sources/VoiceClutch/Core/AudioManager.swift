@@ -10,6 +10,9 @@ private final class AsyncResultBox<T>: @unchecked Sendable {
 public class AudioManager: @unchecked Sendable {
     private let maxRecordingDuration: Double = 30.0
 
+    /// Keep recording briefly after key release so fast utterances do not lose their tail.
+    static let postReleaseCaptureDuration: TimeInterval = 0.50
+
     private var audioEngine: AVAudioEngine?
     private var onTranscription: (@Sendable (String, Bool) -> Void)?
     private let stateLock = NSLock()
@@ -36,9 +39,6 @@ public class AudioManager: @unchecked Sendable {
 
     /// Silence detection threshold (RMS energy level 0.0-1.0).
     private var silenceThreshold: Float = 0.01
-
-    /// Keep recording briefly after key release so fast utterances do not lose their tail.
-    private let postReleaseCaptureDuration: TimeInterval = 0.24
 
     /// Add trailing context to help short phrases decode cleanly.
     private let trailingContextPaddingDuration: Double = 0.18
@@ -170,7 +170,7 @@ public class AudioManager: @unchecked Sendable {
 
         StreamingMetrics.shared.markStopRequested()
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + postReleaseCaptureDuration) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.postReleaseCaptureDuration) { [weak self] in
             self?.finalizeRecording()
         }
     }

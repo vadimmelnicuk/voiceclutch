@@ -20,6 +20,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var permissionCheckTimer: Timer?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var isListeningHotkeyHeld = false
+    private var shouldPlayReleaseChimeForCurrentHold = false
 
     // MARK: - Lifecycle
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -74,8 +75,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showModelDownloadError(_ error: Error) async {
         let alert = NSAlert()
-        alert.messageText = "Model Download Failed"
-        alert.informativeText = "Failed to download required models: \(error.localizedDescription)\n\nPlease check your internet connection and try again."
+        alert.messageText = "Model download failed"
+        alert.informativeText = "Failed to download required model: \(error.localizedDescription)\n\nPlease check your internet connection and try again."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Retry")
         alert.addButton(withTitle: "Quit")
@@ -90,16 +91,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showFirstLaunchAlert(sizeMB: Int64?) async {
         let alert = NSAlert()
-        alert.messageText = "Downloading Required Models"
+        alert.messageText = "Downloading required model"
 
         let sizeText: String
         if let sizeMB = sizeMB {
             sizeText = "\(sizeMB) MB"
         } else {
-            sizeText = "approximately 600 MB"
+            sizeText = "600 MB"
         }
 
-        alert.informativeText = "VoiceClutch needs to download speech recognition models (\(sizeText)). This only happens once."
+        alert.informativeText = "VoiceClutch needs to download speech recognition model (\(sizeText)). This only happens once."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         alert.runModal()
@@ -107,8 +108,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showDownloadCompleteNotification() async {
         let alert = NSAlert()
-        alert.messageText = "Models Downloaded Successfully"
-        alert.informativeText = "VoiceClutch is ready to use! Press and hold your selected shortcut to start dictating."
+        alert.messageText = "Model downloaded successfully"
+        alert.informativeText = "VoiceClutch will be ready to use once the model is loaded into memory."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         alert.runModal()
@@ -273,13 +274,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             guard currentState == .idle else { return }
+            guard dictationController.isReady else {
+                showNotReadyNotification()
+                return
+            }
 
             isListeningHotkeyHeld = true
+            if MicrophoneChimePreference.load() {
+                MicrophoneChimePlayer.playPressChime()
+                shouldPlayReleaseChimeForCurrentHold = true
+            } else {
+                shouldPlayReleaseChimeForCurrentHold = false
+            }
             Task { [weak self] in
                 await self?.beginListeningFromHotkeyPress()
             }
         case .released:
             isListeningHotkeyHeld = false
+            if shouldPlayReleaseChimeForCurrentHold {
+                MicrophoneChimePlayer.playReleaseChime()
+                shouldPlayReleaseChimeForCurrentHold = false
+            }
 
             if currentState == .recording {
                 stopRecording()
@@ -343,7 +358,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let message: String
         switch currentState {
         case .downloading:
-            message = "VoiceClutch is downloading models"
+            message = "VoiceClutch is downloading model"
         case .loadingModel:
             message = "VoiceClutch is loading model"
         default:

@@ -12,6 +12,7 @@ class StatusBarController: NSObject {
     private let toolbarIcon: NSImage?
     private let activeListeningToolbarIcon: NSImage?
     private var isShowingActiveListeningIcon: Bool?
+    private var pendingToolbarIconTransitionWorkItem: DispatchWorkItem?
     private var previousState: VoiceClutchState?
     private var notificationPopover: NSPopover?
     private var notificationDismissWorkItem: DispatchWorkItem?
@@ -91,9 +92,15 @@ class StatusBarController: NSObject {
             let shouldAnimateTransition = activeListeningToolbarIcon != nil &&
                 isShowingActiveListeningIcon != nil &&
                 isShowingActiveListeningIcon != wantsActiveListeningIcon
-            setToolbarButtonImage(targetImage, on: button, animated: shouldAnimateTransition)
-            isShowingActiveListeningIcon = wantsActiveListeningIcon
+            updateToolbarButtonImage(
+                targetImage,
+                wantsActiveListeningIcon: wantsActiveListeningIcon,
+                on: button,
+                animated: shouldAnimateTransition
+            )
         } else {
+            pendingToolbarIconTransitionWorkItem?.cancel()
+            pendingToolbarIconTransitionWorkItem = nil
             isShowingActiveListeningIcon = nil
             button.image = nil
             button.imagePosition = .noImage
@@ -326,6 +333,37 @@ class StatusBarController: NSObject {
         }
 
         button.image = image
+    }
+
+    private func updateToolbarButtonImage(
+        _ image: NSImage,
+        wantsActiveListeningIcon: Bool,
+        on button: NSStatusBarButton,
+        animated: Bool
+    ) {
+        pendingToolbarIconTransitionWorkItem?.cancel()
+        pendingToolbarIconTransitionWorkItem = nil
+
+        let isTransitioningOffActiveListening = (isShowingActiveListeningIcon == true) &&
+            !wantsActiveListeningIcon &&
+            animated
+        guard isTransitioningOffActiveListening else {
+            setToolbarButtonImage(image, on: button, animated: animated)
+            isShowingActiveListeningIcon = wantsActiveListeningIcon
+            return
+        }
+
+        let workItem = DispatchWorkItem { [weak self, weak button] in
+            guard let self, let button else { return }
+            self.setToolbarButtonImage(image, on: button, animated: true)
+            self.isShowingActiveListeningIcon = wantsActiveListeningIcon
+            self.pendingToolbarIconTransitionWorkItem = nil
+        }
+        pendingToolbarIconTransitionWorkItem = workItem
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + AudioManager.postReleaseCaptureDuration,
+            execute: workItem
+        )
     }
 
     private func applyToolbarOpacity(for state: VoiceClutchState, on button: NSStatusBarButton) {
