@@ -6,7 +6,11 @@ class PreferencesWindowController: NSWindowController {
         static let contentWidth: CGFloat = 520
         static let contentHeight: CGFloat = 372
         static let rowHeight: CGFloat = 52
-        static let tallRowHeight: CGFloat = 64
+    }
+
+    private enum CustomShortcutCapture {
+        static let escapeKeyCode: UInt16 = 53
+        static let completedResponse = NSApplication.ModalResponse(rawValue: 2_001)
     }
 
     private let onShortcutChanged: @MainActor (ListeningShortcut) -> Void
@@ -14,6 +18,18 @@ class PreferencesWindowController: NSWindowController {
     private let clipboardRecoverySwitch = NSSwitch(frame: .zero)
     private let mediaPauseSwitch = NSSwitch(frame: .zero)
     private let microphoneChimeSwitch = NSSwitch(frame: .zero)
+    private var customShortcutCaptureMonitor: Any?
+    private var capturedShortcutCodes = Set<UInt32>()
+    private var isCapturingCustomShortcut = false
+    private let listeningShortcutMenuItems: [ListeningShortcut] = [
+        .leftOption,
+        .rightOption,
+        .control,
+        .rightControl,
+        .rightCommand,
+        .rightShift,
+        .custom
+    ]
 
     init(onShortcutChanged: @escaping @MainActor (ListeningShortcut) -> Void) {
         self.onShortcutChanged = onShortcutChanged
@@ -56,7 +72,7 @@ class PreferencesWindowController: NSWindowController {
         shortcutPopup.translatesAutoresizingMaskIntoConstraints = false
         shortcutPopup.target = self
         shortcutPopup.action = #selector(shortcutChanged(_:))
-        shortcutPopup.addItems(withTitles: ListeningShortcut.allCases.map(\.menuTitle))
+        shortcutPopup.addItems(withTitles: listeningShortcutMenuItems.map(\.menuTitle))
         for (index, item) in shortcutPopup.itemArray.enumerated() {
             item.tag = index
         }
@@ -84,26 +100,25 @@ class PreferencesWindowController: NSWindowController {
         syncMediaPausePreference()
 
         let mediaPauseRow = makeSettingsRow(
-            title: "Pause media while listening",
-            detail: "Pause an active macOS media source when dictation starts, then resume on key release.",
-            control: mediaPauseSwitch,
-            minimumHeight: Layout.tallRowHeight
+            title: "Media pause",
+            detail: "Pause macOS media on dictation start, resume on end.",
+            control: mediaPauseSwitch
         )
 
         configureToggle(microphoneChimeSwitch, action: #selector(microphoneChimePreferenceChanged(_:)))
         syncMicrophoneChimePreference()
 
         let microphoneChimeRow = makeSettingsRow(
-            title: "Play microphone chimes",
-            detail: "Play native microphone start/stop chimes when the hold-to-talk key is pressed and released.",
+            title: "Chimes",
+            detail: "Play microphone chimes on hold-to-talk press and release.",
             control: microphoneChimeSwitch
         )
 
-        let updateButton = NSButton(title: "Check Now…", target: self, action: #selector(checkForUpdates))
+        let updateButton = NSButton(title: "Check now", target: self, action: #selector(checkForUpdates))
         updateButton.bezelStyle = .rounded
         let updateRow = makeSettingsRow(
             title: "Software update",
-            detail: "Check for new VoiceClutch releases.",
+            detail: "Check for new releases.",
             control: updateButton,
             showsSeparator: false
         )
@@ -245,13 +260,22 @@ class PreferencesWindowController: NSWindowController {
 
     private func syncShortcutSelection() {
         let shortcut = ListeningShortcut.load()
+        let mappedShortcut = mapStoredShortcutForMenuDisplay(shortcut)
 
-        guard let index = ListeningShortcut.allCases.firstIndex(of: shortcut) else {
+        guard let index = listeningShortcutMenuItems.firstIndex(of: mappedShortcut) else {
             shortcutPopup.selectItem(at: 0)
             return
         }
 
         shortcutPopup.selectItem(at: index)
+        if shortcut == .custom {
+            let title = ListeningShortcut.customConfig().displayText
+            let menuTitle = "Custom: \(title)"
+            shortcutPopup.item(at: index)?.title = menuTitle
+            return
+        }
+
+        shortcutPopup.item(at: index)?.title = shortcut.menuTitle
     }
 
     private func syncClipboardRecoveryPreference() {
@@ -269,15 +293,192 @@ class PreferencesWindowController: NSWindowController {
     @objc private func shortcutChanged(_ sender: NSPopUpButton) {
         guard
             let selectedItem = sender.selectedItem,
-            ListeningShortcut.allCases.indices.contains(selectedItem.tag)
+            listeningShortcutMenuItems.indices.contains(selectedItem.tag)
         else {
             syncShortcutSelection()
             return
         }
 
-        let shortcut = ListeningShortcut.allCases[selectedItem.tag]
+        let shortcut = listeningShortcutMenuItems[selectedItem.tag]
+        if shortcut == .custom {
+            beginCustomShortcutCapture()
+            return
+        }
+
         shortcut.save()
         onShortcutChanged(shortcut)
+    }
+
+    private func mapStoredShortcutForMenuDisplay(_ shortcut: ListeningShortcut) -> ListeningShortcut {
+        switch shortcut {
+        case .shift:
+            return .rightShift
+        case .command:
+            return .rightCommand
+        default:
+            return shortcut
+        }
+    }
+
+    private func beginCustomShortcutCapture() {
+        guard !isCapturingCustomShortcut else { return }
+        guard let hostWindow = window else { return }
+        isCapturingCustomShortcut = true
+        capturedShortcutCodes.removeAll()
+        var snapshotShortcutCodes = Set<UInt32>()
+        let captureCompletedResponse = CustomShortcutCapture.completedResponse
+
+        let alert = NSAlert()
+        alert.messageText = "Set custom hold-to-talk shortcut"
+        alert.informativeText = customShortcutInformativeText()
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Cancel")
+
+        var shouldStopModal = false
+        var shouldPersistShortcut = false
+
+        shortcutPopup.isEnabled = false
+        var selectedTextUpdater: (() -> Void)?
+        selectedTextUpdater = { [weak self] in
+            guard let self = self else { return }
+            alert.informativeText = self.customShortcutInformativeText()
+        }
+
+        let finishCapture: (NSApplication.ModalResponse, Bool) -> Void = { [weak self] response, persist in
+            guard !shouldStopModal else { return }
+            shouldStopModal = true
+            shouldPersistShortcut = persist
+            DispatchQueue.main.async {
+                if let monitor = self?.customShortcutCaptureMonitor {
+                    NSEvent.removeMonitor(monitor)
+                    self?.customShortcutCaptureMonitor = nil
+                }
+                hostWindow.endSheet(alert.window, returnCode: response)
+            }
+        }
+
+        let monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
+            guard let self = self else { return event }
+
+            if event.type == .keyDown && event.keyCode == CustomShortcutCapture.escapeKeyCode {
+                DispatchQueue.main.async {
+                    finishCapture(.cancel, false)
+                }
+                return event
+            }
+
+            if event.type == .keyDown {
+                self.capturedShortcutCodes.insert(UInt32(event.keyCode))
+                snapshotShortcutCodes = self.capturedShortcutCodes
+                DispatchQueue.main.async {
+                    selectedTextUpdater?()
+                }
+                return nil
+            }
+
+            if event.type == .keyUp {
+                let beforeRelease = self.capturedShortcutCodes
+                let changedCode = UInt32(event.keyCode)
+
+                self.capturedShortcutCodes.remove(changedCode)
+                DispatchQueue.main.async { selectedTextUpdater?() }
+
+                guard !beforeRelease.isEmpty else { return nil }
+                snapshotShortcutCodes = beforeRelease
+                DispatchQueue.main.async {
+                    finishCapture(captureCompletedResponse, true)
+                }
+                return nil
+            }
+
+            if event.type == .flagsChanged {
+                let keyCode = UInt32(event.keyCode)
+                guard HotkeyConfig.modifierKeyCodes.contains(keyCode) else {
+                    return event
+                }
+                let beforeRelease = self.capturedShortcutCodes
+
+                if self.isModifierPressed(in: event.modifierFlags, keyCode: keyCode) {
+                    self.capturedShortcutCodes.insert(keyCode)
+                } else {
+                    self.capturedShortcutCodes.remove(keyCode)
+                }
+
+                DispatchQueue.main.async { selectedTextUpdater?() }
+
+                snapshotShortcutCodes = beforeRelease
+                if !self.isModifierPressed(in: event.modifierFlags, keyCode: keyCode) && !beforeRelease.isEmpty {
+                    DispatchQueue.main.async {
+                        finishCapture(captureCompletedResponse, true)
+                    }
+                }
+                return nil
+            }
+
+            return event
+        }
+        customShortcutCaptureMonitor = monitor
+
+        DispatchQueue.main.async {
+            selectedTextUpdater?()
+        }
+
+        // Keep UI responsive while monitoring and allow key events to update the preview.
+        alert.beginSheetModal(for: hostWindow) { [weak self] response in
+            guard let self = self else { return }
+
+            if let monitor = self.customShortcutCaptureMonitor {
+                NSEvent.removeMonitor(monitor)
+                self.customShortcutCaptureMonitor = nil
+            }
+            self.isCapturingCustomShortcut = false
+            self.shortcutPopup.isEnabled = true
+
+            guard shouldPersistShortcut,
+                  response == captureCompletedResponse,
+                  !snapshotShortcutCodes.isEmpty else {
+                self.syncShortcutSelection()
+                return
+            }
+
+            let capturedConfig = HotkeyConfig(keyCodes: Array(snapshotShortcutCodes))
+            ListeningShortcut.saveCustomConfig(capturedConfig)
+            ListeningShortcut.custom.save()
+            self.onShortcutChanged(.custom)
+            self.syncShortcutSelection()
+        }
+    }
+
+    private func customShortcutInformativeText() -> String {
+        "Hold keys together, then release to register. Press Escape to cancel.\n\n\(currentCustomShortcutText())"
+    }
+
+    private func isModifierPressed(in modifierFlags: NSEvent.ModifierFlags, keyCode: UInt32) -> Bool {
+        switch keyCode {
+        case HotkeyConfig.commandKey, HotkeyConfig.rightCommandKey:
+            return modifierFlags.contains(.command)
+        case HotkeyConfig.optionKey, HotkeyConfig.rightOptionKey:
+            return modifierFlags.contains(.option)
+        case HotkeyConfig.controlKey, HotkeyConfig.rightControlKey:
+            return modifierFlags.contains(.control)
+        case HotkeyConfig.shiftKey, HotkeyConfig.rightShiftKey:
+            return modifierFlags.contains(.shift)
+        default:
+            return false
+        }
+    }
+
+    private func currentCustomShortcutText() -> String {
+        if capturedShortcutCodes.isEmpty {
+            return "Press and hold one or more keys..."
+        }
+
+        let names = HotkeyConfig(keyCodes: Array(capturedShortcutCodes)).displayText
+        if names.isEmpty {
+            return "Press and hold one or more keys..."
+        }
+
+        return names
     }
 
     @objc private func clipboardRecoveryChanged(_ sender: NSSwitch) {
@@ -294,10 +495,11 @@ class PreferencesWindowController: NSWindowController {
 
     @objc private func checkForUpdates() {
         guard let window = window else { return }
+        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
 
         let alert = NSAlert()
-        alert.messageText = "VoiceClutch is up to date!"
-        alert.informativeText = "You are running the latest version."
+        alert.messageText = "VoiceClutch is up to date"
+        alert.informativeText = "You are running the latest release.\nCurrent version: \(currentVersion)"
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         alert.beginSheetModal(for: window)

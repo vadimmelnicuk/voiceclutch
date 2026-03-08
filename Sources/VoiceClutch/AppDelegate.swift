@@ -17,6 +17,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let mediaPlaybackController = MediaPlaybackController()
     private var statusBarController: StatusBarController?
     private var currentListeningShortcut = ListeningShortcut.load()
+    private var currentListeningShortcutConfig: HotkeyConfig = ListeningShortcut.load().hotkeyConfig
     private var permissionCheckTimer: Timer?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var isListeningHotkeyHeld = false
@@ -172,14 +173,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        print("❌ Failed to register listening shortcut: \(config.keyCode)")
+        print("❌ Failed to register listening shortcut: \(config.displayText)")
+        statusBarController?.showToolbarNotification(
+            "Could not register hold-to-talk shortcut: \(config.displayText). Choose another key combination."
+        )
     }
 
     func applyListeningShortcut(_ shortcut: ListeningShortcut, force: Bool = false) {
-        guard force || shortcut != currentListeningShortcut else { return }
+        let config = shortcut.hotkeyConfig
+        let shouldUpdate = force || shortcut != currentListeningShortcut || currentListeningShortcutConfig != config
+        guard shouldUpdate else { return }
 
         currentListeningShortcut = shortcut
-        attemptHotkeyRegistration(config: shortcut.hotkeyConfig, attempt: 1, maxAttempts: 5)
+        currentListeningShortcutConfig = config
+        attemptHotkeyRegistration(config: config, attempt: 1, maxAttempts: 5)
     }
 
     private func setupStateObserving() {

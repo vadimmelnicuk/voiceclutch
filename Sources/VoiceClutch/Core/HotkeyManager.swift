@@ -1,6 +1,7 @@
 import Foundation
 import CoreGraphics
 import ApplicationServices
+import Carbon
 
 // MARK: - Hotkey Event Types
 
@@ -11,13 +12,24 @@ public enum HotkeyEventType: Int32, Sendable {
 
 // MARK: - Hotkey Configuration
 
-public struct HotkeyConfig: Sendable {
+public struct HotkeyConfig: Sendable, Equatable {
     public let keyCode: UInt32
     public let modifiers: UInt32
+    public let requiredKeyCodes: Set<UInt32>
     
     public init(keyCode: UInt32, modifiers: UInt32) {
         self.keyCode = keyCode
         self.modifiers = modifiers
+        self.requiredKeyCodes = Set([keyCode])
+    }
+
+    public init(keyCodes: [UInt32]) {
+        let normalized = Set(keyCodes)
+        let fallback = normalized.sorted().first ?? HotkeyConfig.controlKey
+
+        self.keyCode = fallback
+        self.modifiers = 0
+        self.requiredKeyCodes = normalized.isEmpty ? Set([fallback]) : normalized
     }
     
     // Common key codes
@@ -26,16 +38,303 @@ public struct HotkeyConfig: Sendable {
     public static let commandKey: UInt32 = 0x37  // Left Command
     public static let rightCommandKey: UInt32 = 0x36  // Right Command
     public static let shiftKey: UInt32 = 0x38  // Left Shift
+    public static let rightShiftKey: UInt32 = 0x3C  // Right Shift
     public static let controlKey: UInt32 = 0x3B  // Left Control
+    public static let rightControlKey: UInt32 = 0x3E  // Right Control
     public static let spaceKey: UInt32 = 0x31
-    public static let dKey: UInt32 = 0x02
-    public static let rKey: UInt32 = 0x0F
     
-    // CGEvent modifier flags
-    public static let cmdModifier: UInt32 = UInt32(CGEventFlags.maskCommand.rawValue)
-    public static let optionModifier: UInt32 = UInt32(CGEventFlags.maskAlternate.rawValue)
-    public static let controlModifier: UInt32 = UInt32(CGEventFlags.maskControl.rawValue)
-    public static let shiftModifier: UInt32 = UInt32(CGEventFlags.maskShift.rawValue)
+    public static let modifierKeyCodes: Set<UInt32> = [
+        optionKey,
+        rightOptionKey,
+        commandKey,
+        rightCommandKey,
+        shiftKey,
+        rightShiftKey,
+        controlKey,
+        rightControlKey
+    ]
+
+    static let modifierFlagsByKeyCode: [UInt32: CGEventFlags] = [
+        optionKey: .maskAlternate,
+        rightOptionKey: .maskAlternate,
+        commandKey: .maskCommand,
+        rightCommandKey: .maskCommand,
+        shiftKey: .maskShift,
+        rightShiftKey: .maskShift,
+        controlKey: .maskControl,
+        rightControlKey: .maskControl
+    ]
+
+    public var isValid: Bool {
+        !requiredKeyCodes.isEmpty
+    }
+    
+    public var displayText: String {
+        let keyNames = requiredKeyCodes
+            .sorted { lhs, rhs in
+                let lhsIsModifier = Self.modifierKeyCodes.contains(lhs)
+                let rhsIsModifier = Self.modifierKeyCodes.contains(rhs)
+                if lhsIsModifier != rhsIsModifier {
+                    return lhsIsModifier && !rhsIsModifier
+                }
+                return lhs < rhs
+            }
+            .map(Self.displayName(for:))
+            .filter { !$0.isEmpty }
+
+        return keyNames.joined(separator: " + ")
+    }
+    
+    public static func displayName(for keyCode: UInt32) -> String {
+        if let displayName = namedKeyName(by: keyCode) {
+            return displayName
+        }
+
+        switch keyCode {
+        case commandKey, rightCommandKey:
+            return "⌘"
+        case optionKey, rightOptionKey:
+            return "⌥"
+        case controlKey, rightControlKey:
+            return "⌃"
+        case shiftKey, rightShiftKey:
+            return "⇧"
+        case spaceKey:
+            return "Space"
+        default:
+            return "0x\(String(keyCode, radix: 16, uppercase: true))"
+        }
+    }
+
+    private static func namedKeyName(by keyCode: UInt32) -> String? {
+        switch keyCode {
+        case UInt32(kVK_Escape):
+            return "Esc"
+        case UInt32(kVK_Delete):
+            return "Delete"
+        case UInt32(kVK_Tab):
+            return "Tab"
+        case UInt32(kVK_Return):
+            return "Return"
+        case UInt32(kVK_ANSI_Grave):
+            return "`"
+        case UInt32(kVK_ANSI_1):
+            return "1"
+        case UInt32(kVK_ANSI_2):
+            return "2"
+        case UInt32(kVK_ANSI_3):
+            return "3"
+        case UInt32(kVK_ANSI_4):
+            return "4"
+        case UInt32(kVK_ANSI_5):
+            return "5"
+        case UInt32(kVK_ANSI_6):
+            return "6"
+        case UInt32(kVK_ANSI_7):
+            return "7"
+        case UInt32(kVK_ANSI_8):
+            return "8"
+        case UInt32(kVK_ANSI_9):
+            return "9"
+        case UInt32(kVK_ANSI_0):
+            return "0"
+        case UInt32(kVK_ANSI_Minus):
+            return "-"
+        case UInt32(kVK_ANSI_Equal):
+            return "="
+        case UInt32(kVK_ANSI_Q):
+            return "Q"
+        case UInt32(kVK_ANSI_W):
+            return "W"
+        case UInt32(kVK_ANSI_E):
+            return "E"
+        case UInt32(kVK_ANSI_R):
+            return "R"
+        case UInt32(kVK_ANSI_T):
+            return "T"
+        case UInt32(kVK_ANSI_Y):
+            return "Y"
+        case UInt32(kVK_ANSI_U):
+            return "U"
+        case UInt32(kVK_ANSI_I):
+            return "I"
+        case UInt32(kVK_ANSI_O):
+            return "O"
+        case UInt32(kVK_ANSI_P):
+            return "P"
+        case UInt32(kVK_ANSI_LeftBracket):
+            return "["
+        case UInt32(kVK_ANSI_RightBracket):
+            return "]"
+        case UInt32(kVK_ANSI_A):
+            return "A"
+        case UInt32(kVK_ANSI_S):
+            return "S"
+        case UInt32(kVK_ANSI_D):
+            return "D"
+        case UInt32(kVK_ANSI_F):
+            return "F"
+        case UInt32(kVK_ANSI_G):
+            return "G"
+        case UInt32(kVK_ANSI_H):
+            return "H"
+        case UInt32(kVK_ANSI_J):
+            return "J"
+        case UInt32(kVK_ANSI_K):
+            return "K"
+        case UInt32(kVK_ANSI_L):
+            return "L"
+        case UInt32(kVK_ANSI_Semicolon):
+            return ";"
+        case UInt32(kVK_ANSI_Quote):
+            return "'"
+        case UInt32(kVK_ANSI_Z):
+            return "Z"
+        case UInt32(kVK_ANSI_X):
+            return "X"
+        case UInt32(kVK_ANSI_C):
+            return "C"
+        case UInt32(kVK_ANSI_V):
+            return "V"
+        case UInt32(kVK_ANSI_B):
+            return "B"
+        case UInt32(kVK_ANSI_N):
+            return "N"
+        case UInt32(kVK_ANSI_M):
+            return "M"
+        case UInt32(kVK_ANSI_Comma):
+            return ","
+        case UInt32(kVK_ANSI_Period):
+            return "."
+        case UInt32(kVK_ANSI_Slash):
+            return "/"
+        case UInt32(kVK_ANSI_Backslash):
+            return "\\"
+        case spaceKey:
+            return "Space"
+        case UInt32(kVK_ANSI_KeypadDecimal):
+            return "Numpad ."
+        case UInt32(kVK_ANSI_KeypadMultiply):
+            return "Numpad *"
+        case UInt32(kVK_ANSI_KeypadPlus):
+            return "Numpad +"
+        case UInt32(kVK_ANSI_KeypadMinus):
+            return "Numpad -"
+        case UInt32(kVK_ANSI_KeypadDivide):
+            return "Numpad /"
+        case UInt32(kVK_ANSI_KeypadEnter):
+            return "Numpad Enter"
+        case UInt32(kVK_ANSI_Keypad0):
+            return "Numpad 0"
+        case UInt32(kVK_ANSI_Keypad1):
+            return "Numpad 1"
+        case UInt32(kVK_ANSI_Keypad2):
+            return "Numpad 2"
+        case UInt32(kVK_ANSI_Keypad3):
+            return "Numpad 3"
+        case UInt32(kVK_ANSI_Keypad4):
+            return "Numpad 4"
+        case UInt32(kVK_ANSI_Keypad5):
+            return "Numpad 5"
+        case UInt32(kVK_ANSI_Keypad6):
+            return "Numpad 6"
+        case UInt32(kVK_ANSI_Keypad7):
+            return "Numpad 7"
+        case UInt32(kVK_ANSI_Keypad8):
+            return "Numpad 8"
+        case UInt32(kVK_ANSI_Keypad9):
+            return "Numpad 9"
+        case UInt32(kVK_ANSI_KeypadEquals):
+            return "Numpad ="
+        case UInt32(kVK_LeftArrow):
+            return "←"
+        case UInt32(kVK_RightArrow):
+            return "→"
+        case UInt32(kVK_DownArrow):
+            return "↓"
+        case UInt32(kVK_UpArrow):
+            return "↑"
+        case UInt32(kVK_PageUp):
+            return "Page Up"
+        case UInt32(kVK_PageDown):
+            return "Page Down"
+        case UInt32(kVK_Home):
+            return "Home"
+        case UInt32(kVK_End):
+            return "End"
+        case UInt32(kVK_F1):
+            return "F1"
+        case UInt32(kVK_F2):
+            return "F2"
+        case UInt32(kVK_F3):
+            return "F3"
+        case UInt32(kVK_F4):
+            return "F4"
+        case UInt32(kVK_F5):
+            return "F5"
+        case UInt32(kVK_F6):
+            return "F6"
+        case UInt32(kVK_F7):
+            return "F7"
+        case UInt32(kVK_F8):
+            return "F8"
+        case UInt32(kVK_F9):
+            return "F9"
+        case UInt32(kVK_F10):
+            return "F10"
+        case UInt32(kVK_F11):
+            return "F11"
+        case UInt32(kVK_F12):
+            return "F12"
+        case UInt32(kVK_F13):
+            return "F13"
+        case UInt32(kVK_F14):
+            return "F14"
+        case UInt32(kVK_F15):
+            return "F15"
+        case UInt32(kVK_F16):
+            return "F16"
+        case UInt32(kVK_F17):
+            return "F17"
+        case UInt32(kVK_F18):
+            return "F18"
+        case UInt32(kVK_F19):
+            return "F19"
+        case UInt32(kVK_F20):
+            return "F20"
+        default:
+            return keyboardDisplayName(for: keyCode)
+        }
+    }
+
+    private static func keyboardDisplayName(for keyCode: UInt32) -> String? {
+        guard let event = CGEvent(
+            keyboardEventSource: nil,
+            virtualKey: CGKeyCode(keyCode),
+            keyDown: true
+        ) else {
+            return nil
+        }
+
+        var length = 0
+        var string = [UniChar](repeating: 0, count: 4)
+        string.withUnsafeMutableBufferPointer { buffer in
+            if let baseAddress = buffer.baseAddress {
+                event.keyboardGetUnicodeString(
+                    maxStringLength: buffer.count,
+                    actualStringLength: &length,
+                    unicodeString: baseAddress
+                )
+            }
+        }
+        guard length > 0 else {
+            return nil
+        }
+
+        let value = String(decoding: string.prefix(length), as: UTF16.self)
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
     
     // Default: Left Option key alone
     public static func `default`() -> HotkeyConfig {
@@ -56,6 +355,7 @@ public class HotkeyManager: @unchecked Sendable {
     private var callback: HotkeyCallback?
     private var isPressed = false
     private var config: HotkeyConfig?
+    private var pressedKeyCodes = Set<UInt32>()
     
     // CGEventTap resources
     private var eventTap: CFMachPort?
@@ -63,13 +363,6 @@ public class HotkeyManager: @unchecked Sendable {
     
     // Serial queue for thread-safe access
     private let queue = DispatchQueue(label: "dev.vm.voiceclutch.hotkey", qos: .userInteractive)
-    
-    // Throttling to prevent callback flooding
-    private var lastCallbackTime: Date = Date.distantPast
-    private let minCallbackInterval: TimeInterval = 0.05  // 50ms minimum between callbacks
-    private var eventCount = 0
-    private var pendingPress = false
-    private var pendingRelease = false
     
     public init() {}
     
@@ -125,14 +418,15 @@ public class HotkeyManager: @unchecked Sendable {
         self.config = config
         self.callback = callback
         self.isPressed = false
+        self.pressedKeyCodes.removeAll()
 
         // Check current accessibility state before attempting creation
         let options = NSMutableDictionary()
         options.setObject(false, forKey: "AXTrustedCheckOptionPrompt" as NSString)
         _ = AXIsProcessTrustedWithOptions(options)
 
-        let eventMask = (1 << CGEventType.keyDown.rawValue) | 
-                        (1 << CGEventType.keyUp.rawValue) | 
+        let eventMask = (1 << CGEventType.keyDown.rawValue) |
+                        (1 << CGEventType.keyUp.rawValue) |
                         (1 << CGEventType.flagsChanged.rawValue)
         
         // Keep reference to self for the callback
@@ -186,19 +480,13 @@ public class HotkeyManager: @unchecked Sendable {
             self.callback = nil
             self.config = nil
             self.isPressed = false
-            self.eventCount = 0
-            self.pendingPress = false
-            self.pendingRelease = false
+            self.pressedKeyCodes.removeAll()
         }
     }
     
     // MARK: - Event Handling
-    
-    private func handleCGEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        guard let config = self.config else {
-            return Unmanaged.passRetained(event)
-        }
 
+    private func handleCGEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         // Ignore synthetic events emitted by TextInjector to avoid re-entrant
         // hotkey press/release transitions while streaming text updates.
         let sourceTag = event.getIntegerValueField(.eventSourceUserData)
@@ -206,132 +494,72 @@ public class HotkeyManager: @unchecked Sendable {
             return Unmanaged.passRetained(event)
         }
         
-        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        let keyCode = UInt32(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
         
-        // Handle modifier-only hotkeys (when config.modifiers == 0 and keyCode is a modifier key)
-        if config.modifiers == 0 && isModifierKey(config.keyCode) {
-            return handleModifierKeyEvent(type: type, keyCode: keyCode, flags: flags, config: config, event: event)
-        }
-        
-        // Handle regular key hotkeys
-        if UInt32(keyCode) == config.keyCode {
-            // Check if modifiers match
-            let modifiersMatch = checkModifiers(flags, expected: config.modifiers)
-            
-            if modifiersMatch {
-                if type == .keyDown && !isPressed {
-                    isPressed = true
-                    DispatchQueue.main.async { [weak self] in
-                        self?.callback?(.pressed)
-                    }
-                } else if type == .keyUp && isPressed {
-                    isPressed = false
-                    DispatchQueue.main.async { [weak self] in
-                        self?.callback?(.released)
-                    }
+        var eventTypeToEmit: HotkeyEventType?
+        var callbackToEmit: HotkeyCallback?
+
+        queue.sync {
+            guard let config = self.config, config.isValid else {
+                return
+            }
+            callbackToEmit = self.callback
+
+            switch type {
+            case .flagsChanged:
+                guard HotkeyConfig.modifierKeyCodes.contains(keyCode) else {
+                    return
                 }
+
+                if isSpecificModifierPressed(flags, keyCode: keyCode) {
+                    pressedKeyCodes.insert(keyCode)
+                } else {
+                    pressedKeyCodes.remove(keyCode)
+                }
+            case .keyDown:
+                pressedKeyCodes.insert(keyCode)
+            case .keyUp:
+                pressedKeyCodes.remove(keyCode)
+            default:
+                return
+            }
+
+            if !config.requiredKeyCodes.isSubset(of: pressedKeyCodes) {
+                if isPressed {
+                    isPressed = false
+                    eventTypeToEmit = .released
+                }
+                return
+            }
+
+            if !isPressed {
+                isPressed = true
+                eventTypeToEmit = .pressed
             }
         }
         
+        if let eventTypeToEmit {
+            invokeCallback(eventTypeToEmit, callbackToEmit)
+        }
+
         return Unmanaged.passRetained(event)
     }
     
-    /// Handle modifier-only hotkeys (Option, Command, Control, Shift alone)
-    /// Uses flagsChanged events but filters to only our specific keyCode to avoid interference from
-    /// programmatic key events like Command+V from text injection
-    private func handleModifierKeyEvent(type: CGEventType, keyCode: Int64, flags: CGEventFlags, config: HotkeyConfig, event: CGEvent) -> Unmanaged<CGEvent>? {
-        eventCount += 1
-
-        // Only process flagsChanged events for our specific key code
-        // This filters out events from other keys (e.g., Command key from Command+V)
-        guard type == .flagsChanged && Int64(config.keyCode) == keyCode else {
-            return Unmanaged.passRetained(event)
-        }
-
-        // Check if our specific modifier is pressed
-        let isOurModifierPressed = isSpecificModifierPressed(flags, keyCode: config.keyCode)
-
-        if isOurModifierPressed && !isPressed {
-            isPressed = true
-            invokeCallback(.pressed)
-        } else if !isOurModifierPressed && isPressed {
-            isPressed = false
-            invokeCallback(.released)
-        }
-
-        // Always pass the event through to avoid system issues
-        return Unmanaged.passRetained(event)
-    }
-    
-    /// Invoke callback with throttling to prevent stack overflow
-    /// Direct callback - no more Bun FFI issues in pure Swift app!
-    private func invokeCallback(_ eventType: HotkeyEventType) {
-        // Direct callback to Swift handler - no polling needed
+    private func invokeCallback(_ eventType: HotkeyEventType, _ callback: HotkeyCallback?) {
         callback?(eventType)
     }
     
     // MARK: - Helper Methods
     
-    private func isModifierKey(_ keyCode: UInt32) -> Bool {
-        return keyCode == HotkeyConfig.optionKey ||
-               keyCode == HotkeyConfig.rightOptionKey ||
-               keyCode == HotkeyConfig.commandKey ||
-               keyCode == HotkeyConfig.rightCommandKey ||
-               keyCode == HotkeyConfig.shiftKey ||
-               keyCode == HotkeyConfig.controlKey
-    }
-    
     private func isSpecificModifierPressed(_ flags: CGEventFlags, keyCode: UInt32) -> Bool {
-        switch keyCode {
-        case HotkeyConfig.optionKey:
-            // Check if left option is pressed (maskAlternate without maskLeftAlternate distinction)
-            return flags.contains(.maskAlternate)
-        case HotkeyConfig.rightOptionKey:
-            return flags.contains(.maskAlternate)
-        case HotkeyConfig.commandKey:
-            return flags.contains(.maskCommand)
-        case HotkeyConfig.rightCommandKey:
-            return flags.contains(.maskCommand)
-        case HotkeyConfig.shiftKey:
-            return flags.contains(.maskShift)
-        case HotkeyConfig.controlKey:
-            return flags.contains(.maskControl)
-        default:
-            return false
-        }
-    }
-    
-    private func checkModifiers(_ flags: CGEventFlags, expected: UInt32) -> Bool {
-        // For now, simple check - if we expect 0 modifiers, ensure no modifiers are pressed
-        // If we expect specific modifiers, check for them
-        if expected == 0 {
-            return !flags.contains(.maskCommand) &&
-                   !flags.contains(.maskAlternate) &&
-                   !flags.contains(.maskControl) &&
-                   !flags.contains(.maskShift)
-        }
-        // TODO: Implement proper modifier checking for combinations
-        return true
+        guard let modifierFlag = HotkeyConfig.modifierFlagsByKeyCode[keyCode] else { return false }
+        return flags.contains(modifierFlag)
     }
     
     // MARK: - State Queries
     
     public func isHotkeyPressed() -> Bool {
         return queue.sync { isPressed }
-    }
-}
-
-// MARK: - String Extension
-
-extension String {
-    var fourCharCode: Int {
-        let utf8 = self.utf8
-        var result: Int = 0
-        for (index, byte) in utf8.enumerated() {
-            guard index < 4 else { break }
-            result = result << 8 | Int(byte)
-        }
-        return result
     }
 }
