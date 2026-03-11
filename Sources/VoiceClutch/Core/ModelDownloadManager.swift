@@ -49,8 +49,8 @@ class ModelDownloadManager: ObservableObject {
             in: .userDomainMask
         ).first!
         return appSupport
-            .appendingPathComponent("FluidAudio", isDirectory: true)
-            .appendingPathComponent("Models", isDirectory: true)
+            .appendingPathComponent("voiceclutch", isDirectory: true)
+            .appendingPathComponent("models", isDirectory: true)
     }
 
     nonisolated static func areModelsInstalled() -> Bool {
