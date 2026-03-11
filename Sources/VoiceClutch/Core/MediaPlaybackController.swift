@@ -42,9 +42,13 @@ final class MediaPlaybackController {
 
     private lazy var symbols: Symbols? = Self.loadSymbols()
     private let callbackQueue = DispatchQueue(label: "dev.vm.voiceclutch.media-playback")
+    private static let resumeDelayNanoseconds: UInt64 = 1_000_000_000
     private var resumeAction: ResumeAction?
+    private var pendingResumeTask: Task<Void, Never>?
+    private var resumeGeneration: UInt64 = 0
 
     func pauseIfActive(timeoutMilliseconds: Int = 150) async -> Bool {
+        cancelPendingResumeTask()
         resumeAction = nil
 
         guard let symbols else {
@@ -93,9 +97,28 @@ final class MediaPlaybackController {
 
         self.resumeAction = nil
 
-        guard let symbols else {
-            return
+        guard symbols != nil else { return }
+
+        cancelPendingResumeTask()
+        let generation = resumeGeneration
+        pendingResumeTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: Self.resumeDelayNanoseconds)
+            guard !Task.isCancelled else { return }
+            self?.performResumeIfCurrent(resumeAction, generation: generation)
         }
+    }
+
+    private func cancelPendingResumeTask() {
+        resumeGeneration &+= 1
+        pendingResumeTask?.cancel()
+        pendingResumeTask = nil
+    }
+
+    private func performResumeIfCurrent(_ resumeAction: ResumeAction, generation: UInt64) {
+        guard generation == resumeGeneration else { return }
+        pendingResumeTask = nil
+
+        guard let symbols else { return }
 
         switch resumeAction {
         case .playCommand:

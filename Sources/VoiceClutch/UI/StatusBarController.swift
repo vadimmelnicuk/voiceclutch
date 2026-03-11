@@ -367,11 +367,12 @@ class StatusBarController: NSObject {
     }
 
     private func applyToolbarOpacity(for state: VoiceClutchState, on button: NSStatusBarButton) {
-        let targetOpacity: CGFloat = state == .loadingModel ? 0.5 : 1.0
-        let wasLoadingModel = previousState == .loadingModel
-        let isExitingLoadingModel = wasLoadingModel && state != .loadingModel
+        let isDimmedState = state == .downloading || state == .loadingModel
+        let targetOpacity: CGFloat = isDimmedState ? 0.5 : 1.0
+        let wasDimmedState = previousState == .downloading || previousState == .loadingModel
+        let isExitingDimmedState = wasDimmedState && !isDimmedState
 
-        if isExitingLoadingModel {
+        if isExitingDimmedState {
             NSAnimationContext.runAnimationGroup { context in
                 context.duration = 0.25
                 context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)

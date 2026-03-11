@@ -59,15 +59,18 @@ class PreferencesWindowController: NSWindowController {
 
         let contentView = NSView(frame: NSRect(x: 0, y: 0, width: Layout.contentWidth, height: Layout.contentHeight))
 
-        let panel = NSVisualEffectView()
+        let panel = NSView()
         panel.translatesAutoresizingMaskIntoConstraints = false
-        panel.material = .windowBackground
-        panel.state = .active
-        panel.blendingMode = .withinWindow
         panel.wantsLayer = true
-        panel.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.55).cgColor
-        panel.layer?.cornerRadius = 10
-        panel.layer?.masksToBounds = true
+        panel.layer?.backgroundColor = preferencesBackgroundColor().cgColor
+        window.backgroundColor = preferencesBackgroundColor()
+
+        let settingsCard = NSView()
+        settingsCard.translatesAutoresizingMaskIntoConstraints = false
+        settingsCard.wantsLayer = true
+        settingsCard.layer?.backgroundColor = settingsCardBackgroundColor().cgColor
+        settingsCard.layer?.cornerRadius = 12
+        settingsCard.layer?.masksToBounds = true
 
         shortcutPopup.translatesAutoresizingMaskIntoConstraints = false
         shortcutPopup.target = self
@@ -136,7 +139,7 @@ class PreferencesWindowController: NSWindowController {
         rowsStack.spacing = 0
         rowsStack.translatesAutoresizingMaskIntoConstraints = false
 
-        panel.addSubview(rowsStack)
+        settingsCard.addSubview(rowsStack)
 
         let doneButton = NSButton(title: "Done", target: self, action: #selector(closePreferences))
         doneButton.translatesAutoresizingMaskIntoConstraints = false
@@ -145,21 +148,27 @@ class PreferencesWindowController: NSWindowController {
         doneButton.heightAnchor.constraint(equalToConstant: doneButton.fittingSize.height).isActive = true
 
         contentView.addSubview(panel)
-        contentView.addSubview(doneButton)
+        panel.addSubview(settingsCard)
+        panel.addSubview(doneButton)
 
         NSLayoutConstraint.activate([
-            panel.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 16),
-            panel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
-            panel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+            panel.topAnchor.constraint(equalTo: contentView.topAnchor),
+            panel.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            panel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+            panel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
 
-            rowsStack.topAnchor.constraint(equalTo: panel.topAnchor),
-            rowsStack.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 16),
-            rowsStack.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -16),
-            rowsStack.bottomAnchor.constraint(equalTo: panel.bottomAnchor),
+            settingsCard.topAnchor.constraint(equalTo: panel.topAnchor, constant: 16),
+            settingsCard.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 16),
+            settingsCard.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -16),
 
-            doneButton.topAnchor.constraint(equalTo: panel.bottomAnchor, constant: 12),
-            doneButton.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
-            doneButton.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -16)
+            rowsStack.topAnchor.constraint(equalTo: settingsCard.topAnchor),
+            rowsStack.leadingAnchor.constraint(equalTo: settingsCard.leadingAnchor, constant: 16),
+            rowsStack.trailingAnchor.constraint(equalTo: settingsCard.trailingAnchor, constant: -16),
+            rowsStack.bottomAnchor.constraint(equalTo: settingsCard.bottomAnchor),
+
+            doneButton.topAnchor.constraint(equalTo: settingsCard.bottomAnchor, constant: 12),
+            doneButton.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -16),
+            doneButton.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -16)
         ])
 
         window.contentView = contentView
@@ -232,7 +241,7 @@ class PreferencesWindowController: NSWindowController {
             let separator = NSView()
             separator.translatesAutoresizingMaskIntoConstraints = false
             separator.wantsLayer = true
-            separator.layer?.backgroundColor = NSColor.separatorColor.withAlphaComponent(0.28).cgColor
+            separator.layer?.backgroundColor = settingsSeparatorColor().cgColor
 
             row.addSubview(separator)
 
@@ -256,6 +265,18 @@ class PreferencesWindowController: NSWindowController {
         let toggleSize = toggle.fittingSize
         toggle.widthAnchor.constraint(equalToConstant: toggleSize.width).isActive = true
         toggle.heightAnchor.constraint(equalToConstant: toggleSize.height).isActive = true
+    }
+
+    private func preferencesBackgroundColor() -> NSColor {
+        return NSColor.windowBackgroundColor
+    }
+
+    private func settingsCardBackgroundColor() -> NSColor {
+        NSColor.alternatingContentBackgroundColors.last ?? NSColor.controlBackgroundColor
+    }
+
+    private func settingsSeparatorColor() -> NSColor {
+        NSColor.separatorColor
     }
 
     private func syncShortcutSelection() {
