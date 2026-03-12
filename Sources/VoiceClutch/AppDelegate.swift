@@ -18,6 +18,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let mediaPlaybackController = MediaPlaybackController()
     private let permissionsCoordinator = PermissionsCoordinator()
     private var statusBarController: StatusBarController?
+    private let vocabularyWindowController = VocabularyWindowController()
     private var currentInteractionMode = ListeningInteractionMode.load()
     private var currentListeningShortcut = ListeningShortcut.load()
     private var currentListeningShortcutConfig: HotkeyConfig = ListeningShortcut.load().hotkeyConfig
@@ -54,6 +55,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
 
         setupStatusBar()
+        setupCorrectionLearning()
         setupDictationController()
         setupStateObserving()
         setupMemoryPressureMonitoring()
@@ -152,6 +154,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         memoryPressureSource = nil
         resumeMediaIfNeeded()
         dictationController.shutdown()
+        CorrectionLearningMonitor.shared.cancel()
+        CorrectionLearningMonitor.shared.uninstallEventMonitors()
     }
 
     // MARK: - Setup
@@ -163,8 +167,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             onInteractionModeChanged: { [weak self] mode in
                 self?.applyListeningInteractionMode(mode)
             },
+            onManageVocabulary: { [weak self] in
+                self?.showVocabularyWindow()
+            },
             permissionsCoordinator: permissionsCoordinator
         )
+    }
+
+    private func setupCorrectionLearning() {
+        CorrectionLearningMonitor.shared.installEventMonitors()
+    }
+
+    private func showVocabularyWindow() {
+        vocabularyWindowController.showWindow()
     }
 
     private func setupDictationController() {

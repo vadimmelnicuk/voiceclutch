@@ -1,5 +1,4 @@
 import Foundation
-import FluidAudio
 import OSLog
 
 /// Manages Nemotron ASR model downloads with progress tracking.
@@ -7,8 +6,9 @@ import OSLog
 class ModelDownloadManager: ObservableObject {
 
     private static let logger = AppLogger(category: "ModelDownloadManager")
-    nonisolated private static var targetRepo: Repo { .nemotronStreaming560 }
-    nonisolated private static var requiredModelPaths: Set<String> { ModelNames.NemotronStreaming.requiredModels }
+    nonisolated private static let targetRemotePath = NemotronModelRepository.remotePath
+    nonisolated private static let targetSubPath = NemotronModelRepository.subPath
+    nonisolated private static let requiredModelPaths = NemotronModelRepository.requiredPaths
 
     /// Download progress from 0.0 to 1.0
     @Published private(set) var progress: Double = 0.0
@@ -40,7 +40,7 @@ class ModelDownloadManager: ObservableObject {
     private var currentDelegate: DownloadDelegate?
 
     nonisolated static var asrModelDirectory: URL {
-        modelsRootDirectory.appendingPathComponent(targetRepo.folderName, isDirectory: true)
+        modelsRootDirectory.appendingPathComponent(NemotronModelRepository.folderName, isDirectory: true)
     }
 
     nonisolated private static var modelsRootDirectory: URL {
@@ -170,13 +170,13 @@ class ModelDownloadManager: ObservableObject {
 
     private func listFilesToDownload() async throws -> [(path: String, size: Int)] {
         var files: [(path: String, size: Int)] = []
-        try await listDirectory(path: Self.targetRepo.subPath ?? "", files: &files)
+        try await listDirectory(path: Self.targetSubPath, files: &files)
         return files
     }
 
     private func listDirectory(path: String, files: inout [(path: String, size: Int)]) async throws {
         let apiPath = path.isEmpty ? "tree/main" : "tree/main/\(path)"
-        let dirURL = try ModelRegistry.apiModels(Self.targetRepo.remotePath, apiPath)
+        let dirURL = try ModelRegistry.apiModels(Self.targetRemotePath, apiPath)
 
         var request = URLRequest(url: dirURL)
         request.timeoutInterval = 30
@@ -223,11 +223,11 @@ class ModelDownloadManager: ObservableObject {
     }
 
     private func stripRepoSubPath(from remotePath: String) -> String? {
-        guard let subPath = Self.targetRepo.subPath, !subPath.isEmpty else {
+        guard !Self.targetSubPath.isEmpty else {
             return remotePath
         }
 
-        let prefix = subPath + "/"
+        let prefix = Self.targetSubPath + "/"
         guard remotePath.hasPrefix(prefix) else {
             return nil
         }
@@ -238,14 +238,14 @@ class ModelDownloadManager: ObservableObject {
 
     private func resolveModelURL(forLocalPath localPath: String) throws -> URL {
         let remotePath: String
-        if let subPath = Self.targetRepo.subPath, !subPath.isEmpty {
-            remotePath = "\(subPath)/\(localPath)"
+        if !Self.targetSubPath.isEmpty {
+            remotePath = "\(Self.targetSubPath)/\(localPath)"
         } else {
             remotePath = localPath
         }
 
         return try ModelRegistry.resolveModel(
-            Self.targetRepo.remotePath,
+            Self.targetRemotePath,
             remotePath.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? remotePath
         )
     }

@@ -1,7 +1,6 @@
 import AVFoundation
 import CoreML
 import Foundation
-import FluidAudio
 
 /// ASR-related errors.
 public enum ASRError: Error, LocalizedError {
@@ -34,7 +33,7 @@ public actor ASRProcessor {
         return format
     }()
 
-    /// FluidAudio Nemotron streaming manager.
+    /// Vendored Nemotron streaming manager.
     private var nemotronManager: NemotronStreamingAsrManager?
 
     /// Whether the model is loaded and ready.
@@ -74,6 +73,7 @@ public actor ASRProcessor {
 
             let manager = NemotronStreamingAsrManager(configuration: modelConfiguration)
             try await manager.loadModels(modelDir: modelDir)
+            await manager.updateCustomVocabulary(CustomVocabularyManager.shared.snapshot())
 
             nemotronManager = manager
             isModelLoaded = true
@@ -91,7 +91,7 @@ public actor ASRProcessor {
 
         guard !hasWarmedUp else { return }
 
-        let chunkSamples = await manager.config.chunkSamples
+        let chunkSamples = await manager.chunkSampleCount
         let warmupSampleCount = max(chunkSamples, 1)
         let warmupSamples = Array(repeating: Float.zero, count: warmupSampleCount)
 
@@ -113,6 +113,7 @@ public actor ASRProcessor {
         }
 
         await manager.reset()
+        await manager.updateCustomVocabulary(CustomVocabularyManager.shared.snapshot())
 
         resetPartialState(handler: onPartialTranscription)
 

@@ -6,7 +6,7 @@ import Combine
 class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private enum Layout {
         static let contentWidth: CGFloat = 520
-        static let contentHeight: CGFloat = 588
+        static let contentHeight: CGFloat = 640
         static let rowHeight: CGFloat = 52
         static let interactionRowHeight: CGFloat = 68
     }
@@ -18,6 +18,7 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
 
     private let onShortcutChanged: @MainActor (ListeningShortcut) -> Void
     private let onInteractionModeChanged: @MainActor (ListeningInteractionMode) -> Void
+    private let onManageVocabulary: @MainActor () -> Void
     private let permissionsCoordinator: PermissionsCoordinator
     private let holdToTalkRadioButton = NSButton(radioButtonWithTitle: "Hold-to-talk", target: nil, action: nil)
     private let listenToggleRadioButton = NSButton(radioButtonWithTitle: "Press-to-talk", target: nil, action: nil)
@@ -47,10 +48,12 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     init(
         onShortcutChanged: @escaping @MainActor (ListeningShortcut) -> Void,
         onInteractionModeChanged: @escaping @MainActor (ListeningInteractionMode) -> Void,
+        onManageVocabulary: @escaping @MainActor () -> Void,
         permissionsCoordinator: PermissionsCoordinator
     ) {
         self.onShortcutChanged = onShortcutChanged
         self.onInteractionModeChanged = onInteractionModeChanged
+        self.onManageVocabulary = onManageVocabulary
         self.permissionsCoordinator = permissionsCoordinator
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: Layout.contentWidth, height: Layout.contentHeight),
@@ -143,7 +146,15 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         let microphoneChimeRow = makeSettingsRow(
             title: "Chimes",
             detail: "Play microphone chimes when listening starts and stops.",
-            control: microphoneChimeSwitch,
+            control: microphoneChimeSwitch
+        )
+
+        let vocabularyButton = NSButton(title: "Manage", target: self, action: #selector(manageVocabulary))
+        vocabularyButton.bezelStyle = .rounded
+        let vocabularyRow = makeSettingsRow(
+            title: "Custom vocabulary",
+            detail: "Edit manual terms and review learned corrections in a separate window.",
+            control: vocabularyButton,
             showsSeparator: false
         )
 
@@ -194,7 +205,8 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         let listeningBehaviorGroup = makeSettingsGroup(rows: [
             clipboardRecoveryRow,
             mediaPauseRow,
-            microphoneChimeRow
+            microphoneChimeRow,
+            vocabularyRow
         ])
 
         let permissionsGroup = makeSettingsGroup(rows: [
@@ -803,6 +815,10 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         alert.beginSheetModal(for: window)
+    }
+
+    @objc private func manageVocabulary() {
+        onManageVocabulary()
     }
 
     @objc private func closePreferences() {

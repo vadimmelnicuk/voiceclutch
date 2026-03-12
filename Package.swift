@@ -15,17 +15,10 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(
-            url: "https://github.com/FluidInference/FluidAudio.git",
-            revision: "fdf6e4c71137a3831d8b732d36102a0a8d5105e3"
-        ),
     ],
     targets: [
         .executableTarget(
             name: "VoiceClutch",
-            dependencies: [
-                .product(name: "FluidAudio", package: "FluidAudio"),
-            ],
             path: "Sources/VoiceClutch",
             linkerSettings: [
                 .linkedFramework("CoreAudio"),

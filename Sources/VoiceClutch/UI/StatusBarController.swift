@@ -26,6 +26,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
     init(
         onShortcutChanged: @escaping @MainActor (ListeningShortcut) -> Void,
         onInteractionModeChanged: @escaping @MainActor (ListeningInteractionMode) -> Void,
+        onManageVocabulary: @escaping @MainActor () -> Void,
         permissionsCoordinator: PermissionsCoordinator
     ) {
         // Use a square status item when showing an icon.
@@ -36,6 +37,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         preferencesWindowController = PreferencesWindowController(
             onShortcutChanged: onShortcutChanged,
             onInteractionModeChanged: onInteractionModeChanged,
+            onManageVocabulary: onManageVocabulary,
             permissionsCoordinator: permissionsCoordinator
         )
         toolbarIcon = Self.loadToolbarIcon()

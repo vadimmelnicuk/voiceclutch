@@ -10,6 +10,19 @@ public enum HotkeyEventType: Int32, Sendable {
     case released = 1
 }
 
+public enum ObservedKeyEventKind: Sendable {
+    case keyDown
+    case keyUp
+    case flagsChanged
+}
+
+public struct ObservedKeyEvent: Sendable {
+    public let kind: ObservedKeyEventKind
+    public let keyCode: UInt32
+    public let modifierFlagsRawValue: UInt64
+    public let characters: String?
+}
+
 // MARK: - Hotkey Configuration
 
 public struct HotkeyConfig: Sendable, Equatable {
@@ -348,11 +361,13 @@ public struct HotkeyConfig: Sendable, Equatable {
 // MARK: - Hotkey Callback
 
 public typealias HotkeyCallback = @Sendable (HotkeyEventType) -> Void
+public typealias RawKeyEventObserver = @Sendable (ObservedKeyEvent) -> Void
 
 // MARK: - Hotkey Manager
 
 public class HotkeyManager: @unchecked Sendable {
     private var callback: HotkeyCallback?
+    private var rawEventObserver: RawKeyEventObserver?
     private var isPressed = false
     private var config: HotkeyConfig?
     private var pressedKeyCodes = Set<UInt32>()
@@ -385,6 +400,12 @@ public class HotkeyManager: @unchecked Sendable {
             return DispatchQueue.main.sync {
                 return self.performRegistrationWithRetry(config: config, callback: callback, attempt: 1)
             }
+        }
+    }
+
+    public func setRawEventObserver(_ observer: RawKeyEventObserver?) {
+        queue.sync {
+            self.rawEventObserver = observer
         }
     }
     
@@ -499,12 +520,16 @@ public class HotkeyManager: @unchecked Sendable {
         
         var eventTypeToEmit: HotkeyEventType?
         var callbackToEmit: HotkeyCallback?
+        var rawEventObserverToEmit: RawKeyEventObserver?
+        let observedKeyEvent = makeObservedKeyEvent(from: event, type: type, keyCode: keyCode)
 
         queue.sync {
             guard let config = self.config, config.isValid else {
+                rawEventObserverToEmit = self.rawEventObserver
                 return
             }
             callbackToEmit = self.callback
+            rawEventObserverToEmit = self.rawEventObserver
 
             switch type {
             case .flagsChanged:
@@ -543,11 +568,60 @@ public class HotkeyManager: @unchecked Sendable {
             invokeCallback(eventTypeToEmit, callbackToEmit)
         }
 
+        if let observedKeyEvent, let rawEventObserverToEmit {
+            rawEventObserverToEmit(observedKeyEvent)
+        }
+
         return Unmanaged.passRetained(event)
     }
     
     private func invokeCallback(_ eventType: HotkeyEventType, _ callback: HotkeyCallback?) {
         callback?(eventType)
+    }
+
+    private func makeObservedKeyEvent(
+        from event: CGEvent,
+        type: CGEventType,
+        keyCode: UInt32
+    ) -> ObservedKeyEvent? {
+        let kind: ObservedKeyEventKind
+        switch type {
+        case .keyDown:
+            kind = .keyDown
+        case .keyUp:
+            kind = .keyUp
+        case .flagsChanged:
+            kind = .flagsChanged
+        default:
+            return nil
+        }
+
+        return ObservedKeyEvent(
+            kind: kind,
+            keyCode: keyCode,
+            modifierFlagsRawValue: event.flags.rawValue,
+            characters: extractCharacters(from: event)
+        )
+    }
+
+    private func extractCharacters(from event: CGEvent) -> String? {
+        var length = 0
+        var characters = [UniChar](repeating: 0, count: 8)
+        characters.withUnsafeMutableBufferPointer { buffer in
+            if let baseAddress = buffer.baseAddress {
+                event.keyboardGetUnicodeString(
+                    maxStringLength: buffer.count,
+                    actualStringLength: &length,
+                    unicodeString: baseAddress
+                )
+            }
+        }
+
+        guard length > 0 else {
+            return nil
+        }
+
+        return String(decoding: characters.prefix(length), as: UTF16.self)
     }
     
     // MARK: - Helper Methods

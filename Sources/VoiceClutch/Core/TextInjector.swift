@@ -92,7 +92,9 @@ public class TextInjector {
     /// Inject text by copying to clipboard and simulating Cmd+V.
     /// - Parameter text: The text string to inject.
     public static func inject(_ text: String) {
-        guard !text.isEmpty else { return }
+        let rewrittenText = CustomVocabularyManager.shared.applyRewriteRules(to: text)
+        let finalText = rewrittenText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !finalText.isEmpty else { return }
 
         let pasteboard = NSPasteboard.general
         let shouldRecoverClipboard = ClipboardRecoveryPreference.load()
@@ -101,11 +103,12 @@ public class TextInjector {
         let originalClipboard = shouldRecoverClipboard ? ClipboardSnapshot.capture(from: pasteboard) : nil
 
         // Copy text to clipboard with trailing space for natural typing.
-        guard let injectedChangeCount = writeToPasteboard(text + " ") else {
+        guard let injectedChangeCount = writeToPasteboard(finalText + " ") else {
             return
         }
 
         simulatePaste()
+        CorrectionLearningMonitor.shared.beginMonitoring(insertedText: finalText + " ")
 
         guard shouldRecoverClipboard else { return }
 
@@ -239,12 +242,14 @@ public class TextInjector {
     }
 
     static func commitStreamingFinalNormalized(_ normalizedTranscript: String) {
-        let normalizedFinalText = finalizedStreamingText(fromNormalizedTranscript: normalizedTranscript)
+        let rewrittenTranscript = CustomVocabularyManager.shared.applyRewriteRules(to: normalizedTranscript)
+        let normalizedFinalText = finalizedStreamingText(fromNormalizedTranscript: rewrittenTranscript)
         let session = takeAndResetStreamingSessionIfActive()
+        let monitoringText = normalizedFinalText
 
         guard let session else {
             if !normalizedFinalText.isEmpty {
-                inject(normalizedFinalText.trimmingCharacters(in: .whitespaces))
+                inject(monitoringText)
             }
             return
         }
@@ -291,6 +296,12 @@ public class TextInjector {
             shouldRecoverClipboard: session.shouldRecoverClipboard,
             expectedChangeCount: expectedChangeCount
         )
+
+        if monitoringText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            CorrectionLearningMonitor.shared.cancel()
+        } else {
+            CorrectionLearningMonitor.shared.beginMonitoring(insertedText: monitoringText)
+        }
     }
 
     private static func finalizedStreamingText(fromNormalizedTranscript cleaned: String) -> String {
@@ -579,6 +590,7 @@ public class TextInjector {
 
     public static func cancelStreamingSession() {
         let session = takeAndResetStreamingSessionIfActive()
+        CorrectionLearningMonitor.shared.cancel()
 
         guard let session else { return }
 
