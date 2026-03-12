@@ -19,7 +19,8 @@ class StatusBarController: NSObject {
 
     init(
         onShortcutChanged: @escaping @MainActor (ListeningShortcut) -> Void,
-        onInteractionModeChanged: @escaping @MainActor (ListeningInteractionMode) -> Void
+        onInteractionModeChanged: @escaping @MainActor (ListeningInteractionMode) -> Void,
+        permissionsCoordinator: PermissionsCoordinator
     ) {
         // Use a square status item when showing an icon.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -28,7 +29,8 @@ class StatusBarController: NSObject {
         menu = NSMenu()
         preferencesWindowController = PreferencesWindowController(
             onShortcutChanged: onShortcutChanged,
-            onInteractionModeChanged: onInteractionModeChanged
+            onInteractionModeChanged: onInteractionModeChanged,
+            permissionsCoordinator: permissionsCoordinator
         )
         toolbarIcon = Self.loadToolbarIcon()
         activeListeningToolbarIcon = toolbarIcon.flatMap {

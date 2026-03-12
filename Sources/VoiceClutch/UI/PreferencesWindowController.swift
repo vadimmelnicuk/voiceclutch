@@ -1,12 +1,14 @@
 import AppKit
+import Combine
+@preconcurrency import AVFoundation
 
 @MainActor
 class PreferencesWindowController: NSWindowController {
     private enum Layout {
         static let contentWidth: CGFloat = 520
-        static let contentHeight: CGFloat = 432
+        static let contentHeight: CGFloat = 588
         static let rowHeight: CGFloat = 52
-        static let interactionRowHeight: CGFloat = 78
+        static let interactionRowHeight: CGFloat = 58
     }
 
     private enum CustomShortcutCapture {
@@ -16,12 +18,18 @@ class PreferencesWindowController: NSWindowController {
 
     private let onShortcutChanged: @MainActor (ListeningShortcut) -> Void
     private let onInteractionModeChanged: @MainActor (ListeningInteractionMode) -> Void
+    private let permissionsCoordinator: PermissionsCoordinator
     private let holdToTalkRadioButton = NSButton(radioButtonWithTitle: "Hold-to-talk", target: nil, action: nil)
     private let listenToggleRadioButton = NSButton(radioButtonWithTitle: "Press-to-talk", target: nil, action: nil)
     private let shortcutPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let clipboardRecoverySwitch = NSSwitch(frame: .zero)
     private let mediaPauseSwitch = NSSwitch(frame: .zero)
     private let microphoneChimeSwitch = NSSwitch(frame: .zero)
+    private let accessibilityPermissionLabel = NSTextField(labelWithString: "")
+    private let accessibilityPermissionButton = NSButton(title: "Grant", target: nil, action: nil)
+    private let microphonePermissionLabel = NSTextField(labelWithString: "")
+    private let microphonePermissionButton = NSButton(title: "Allow", target: nil, action: nil)
+    private var cancellables = Set<AnyCancellable>()
     private var customShortcutCaptureMonitor: Any?
     private var capturedShortcutCodes = Set<UInt32>()
     private var isCapturingCustomShortcut = false
@@ -37,10 +45,12 @@ class PreferencesWindowController: NSWindowController {
 
     init(
         onShortcutChanged: @escaping @MainActor (ListeningShortcut) -> Void,
-        onInteractionModeChanged: @escaping @MainActor (ListeningInteractionMode) -> Void
+        onInteractionModeChanged: @escaping @MainActor (ListeningInteractionMode) -> Void,
+        permissionsCoordinator: PermissionsCoordinator
     ) {
         self.onShortcutChanged = onShortcutChanged
         self.onInteractionModeChanged = onInteractionModeChanged
+        self.permissionsCoordinator = permissionsCoordinator
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: Layout.contentWidth, height: Layout.contentHeight),
             styleMask: [.titled, .closable],
@@ -48,13 +58,14 @@ class PreferencesWindowController: NSWindowController {
             defer: false
         )
         window.title = "VoiceClutch Preferences"
+        window.isOpaque = true
         window.backgroundColor = .windowBackgroundColor
         window.center()
         window.isReleasedWhenClosed = false
         
         super.init(window: window)
-        
         setupContent()
+        bindPermissionUpdates()
         enforceFixedWindowFrame()
     }
     
@@ -67,18 +78,15 @@ class PreferencesWindowController: NSWindowController {
 
         let contentView = NSView(frame: NSRect(x: 0, y: 0, width: Layout.contentWidth, height: Layout.contentHeight))
 
-        let panel = NSView()
+        let panel = NSVisualEffectView()
         panel.translatesAutoresizingMaskIntoConstraints = false
-        panel.wantsLayer = true
-        panel.layer?.backgroundColor = preferencesBackgroundColor().cgColor
-        window.backgroundColor = preferencesBackgroundColor()
-
-        let settingsCard = NSView()
-        settingsCard.translatesAutoresizingMaskIntoConstraints = false
-        settingsCard.wantsLayer = true
-        settingsCard.layer?.backgroundColor = settingsCardBackgroundColor().cgColor
-        settingsCard.layer?.cornerRadius = 12
-        settingsCard.layer?.masksToBounds = true
+        applyLiquidStyle(
+            panel,
+            overlayColor: preferencesBackgroundColor(),
+            cornerRadius: 0,
+            material: .windowBackground,
+            blendingMode: .withinWindow
+        )
 
         let interactionModeControl = makeInteractionModeControl()
         syncInteractionModeSelection()
@@ -105,7 +113,8 @@ class PreferencesWindowController: NSWindowController {
         let shortcutRow = makeSettingsRow(
             title: "Shortcut",
             detail: "Choose which key/combo triggers listening.",
-            control: shortcutPopup
+            control: shortcutPopup,
+            showsSeparator: false
         )
 
         configureToggle(clipboardRecoverySwitch, action: #selector(clipboardRecoveryChanged(_:)))
@@ -132,33 +141,83 @@ class PreferencesWindowController: NSWindowController {
         let microphoneChimeRow = makeSettingsRow(
             title: "Chimes",
             detail: "Play microphone chimes when listening starts and stops.",
-            control: microphoneChimeSwitch
+            control: microphoneChimeSwitch,
+            showsSeparator: false
         )
 
+        configurePermissionStatusLabel(accessibilityPermissionLabel)
+        configurePermissionActionButton(
+            accessibilityPermissionButton,
+            action: #selector(accessibilityPermissionButtonPressed)
+        )
+        let accessibilityPermissionRow = makeSettingsRow(
+            title: "Accessibility",
+            detail: "Required for global shortcut capture.",
+            control: makePermissionControl(
+                statusLabel: accessibilityPermissionLabel,
+                button: accessibilityPermissionButton
+            )
+        )
+
+        configurePermissionStatusLabel(microphonePermissionLabel)
+        configurePermissionActionButton(
+            microphonePermissionButton,
+            action: #selector(microphonePermissionButtonPressed)
+        )
+        let microphonePermissionRow = makeSettingsRow(
+            title: "Microphone",
+            detail: "Required for dictation audio capture.",
+            control: makePermissionControl(
+                statusLabel: microphonePermissionLabel,
+                button: microphonePermissionButton
+            ),
+            showsSeparator: false
+        )
+
+        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
         let updateButton = NSButton(title: "Check now", target: self, action: #selector(checkForUpdates))
         updateButton.bezelStyle = .rounded
         let updateRow = makeSettingsRow(
             title: "Software update",
-            detail: "Check for new releases.",
+            detail: "Current version: \(currentVersion). Check for new releases.",
             control: updateButton,
             showsSeparator: false
         )
 
-        let rowsStack = NSStackView(views: [
+        let interactionGroup = makeSettingsGroup(rows: [
             interactionModeRow,
-            shortcutRow,
+            shortcutRow
+        ])
+
+        let listeningBehaviorGroup = makeSettingsGroup(rows: [
             clipboardRecoveryRow,
             mediaPauseRow,
-            microphoneChimeRow,
-            updateRow
+            microphoneChimeRow
         ])
-        rowsStack.orientation = .vertical
-        rowsStack.alignment = .width
-        rowsStack.distribution = .fill
-        rowsStack.spacing = 0
-        rowsStack.translatesAutoresizingMaskIntoConstraints = false
 
-        settingsCard.addSubview(rowsStack)
+        let permissionsGroup = makeSettingsGroup(rows: [
+            accessibilityPermissionRow,
+            microphonePermissionRow
+        ])
+        let permissionsSection = makeSettingsSection(
+            title: "Permissions",
+            group: permissionsGroup
+        )
+
+        let softwareUpdateGroup = makeSettingsGroup(rows: [updateRow])
+
+        let groupsStack = NSStackView(views: [
+            softwareUpdateGroup,
+            interactionGroup,
+            listeningBehaviorGroup,
+            permissionsSection
+        ])
+        groupsStack.orientation = .vertical
+        groupsStack.alignment = .width
+        groupsStack.distribution = .fill
+        groupsStack.spacing = 8
+        groupsStack.translatesAutoresizingMaskIntoConstraints = false
+        groupsStack.setCustomSpacing(14, after: listeningBehaviorGroup)
 
         let doneButton = NSButton(title: "Done", target: self, action: #selector(closePreferences))
         doneButton.translatesAutoresizingMaskIntoConstraints = false
@@ -167,7 +226,7 @@ class PreferencesWindowController: NSWindowController {
         doneButton.heightAnchor.constraint(equalToConstant: doneButton.fittingSize.height).isActive = true
 
         contentView.addSubview(panel)
-        panel.addSubview(settingsCard)
+        panel.addSubview(groupsStack)
         panel.addSubview(doneButton)
 
         NSLayoutConstraint.activate([
@@ -176,18 +235,13 @@ class PreferencesWindowController: NSWindowController {
             panel.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
             panel.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
 
-            settingsCard.topAnchor.constraint(equalTo: panel.topAnchor, constant: 16),
-            settingsCard.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 16),
-            settingsCard.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -16),
+            groupsStack.topAnchor.constraint(equalTo: panel.topAnchor, constant: 12),
+            groupsStack.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 16),
+            groupsStack.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -16),
 
-            rowsStack.topAnchor.constraint(equalTo: settingsCard.topAnchor),
-            rowsStack.leadingAnchor.constraint(equalTo: settingsCard.leadingAnchor, constant: 16),
-            rowsStack.trailingAnchor.constraint(equalTo: settingsCard.trailingAnchor, constant: -16),
-            rowsStack.bottomAnchor.constraint(equalTo: settingsCard.bottomAnchor),
-
-            doneButton.topAnchor.constraint(equalTo: settingsCard.bottomAnchor, constant: 12),
-            doneButton.trailingAnchor.constraint(equalTo: rowsStack.trailingAnchor),
-            doneButton.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -16)
+            doneButton.topAnchor.constraint(equalTo: groupsStack.bottomAnchor, constant: 10),
+            doneButton.trailingAnchor.constraint(equalTo: groupsStack.trailingAnchor, constant: -16),
+            doneButton.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -12)
         ])
 
         window.contentView = contentView
@@ -275,6 +329,63 @@ class PreferencesWindowController: NSWindowController {
         return row
     }
 
+    private func makeSettingsGroup(rows: [NSView]) -> NSView {
+        let group = NSVisualEffectView()
+        group.translatesAutoresizingMaskIntoConstraints = false
+        applyLiquidStyle(
+            group,
+            overlayColor: settingsCardBackgroundColor(),
+            cornerRadius: 12,
+            material: .hudWindow,
+            blendingMode: .withinWindow
+        )
+
+        let rowsStack = NSStackView(views: rows)
+        rowsStack.translatesAutoresizingMaskIntoConstraints = false
+        rowsStack.orientation = .vertical
+        rowsStack.alignment = .width
+        rowsStack.distribution = .fill
+        rowsStack.spacing = 0
+
+        group.addSubview(rowsStack)
+
+        NSLayoutConstraint.activate([
+            rowsStack.topAnchor.constraint(equalTo: group.topAnchor),
+            rowsStack.leadingAnchor.constraint(equalTo: group.leadingAnchor, constant: 16),
+            rowsStack.trailingAnchor.constraint(equalTo: group.trailingAnchor, constant: -16),
+            rowsStack.bottomAnchor.constraint(equalTo: group.bottomAnchor)
+        ])
+
+        return group
+    }
+
+    private func makeSettingsSection(title: String, group: NSView) -> NSView {
+        let headingLabel = NSTextField(labelWithString: title)
+        headingLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        headingLabel.textColor = .labelColor
+        headingLabel.alignment = .left
+
+        let headingContainer = NSView()
+        headingContainer.translatesAutoresizingMaskIntoConstraints = false
+        headingContainer.addSubview(headingLabel)
+
+        headingLabel.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            headingLabel.leadingAnchor.constraint(equalTo: headingContainer.leadingAnchor, constant: 16),
+            headingLabel.trailingAnchor.constraint(lessThanOrEqualTo: headingContainer.trailingAnchor),
+            headingLabel.topAnchor.constraint(equalTo: headingContainer.topAnchor),
+            headingLabel.bottomAnchor.constraint(equalTo: headingContainer.bottomAnchor)
+        ])
+
+        let sectionStack = NSStackView(views: [headingContainer, group])
+        sectionStack.translatesAutoresizingMaskIntoConstraints = false
+        sectionStack.orientation = .vertical
+        sectionStack.alignment = .width
+        sectionStack.distribution = .fill
+        sectionStack.spacing = 6
+        return sectionStack
+    }
+
     private func makeInteractionModeControl() -> NSView {
         configureRadioButton(holdToTalkRadioButton, mode: .holdToTalk, tag: 0)
         configureRadioButton(listenToggleRadioButton, mode: .listenToggle, tag: 1)
@@ -310,16 +421,65 @@ class PreferencesWindowController: NSWindowController {
         toggle.heightAnchor.constraint(equalToConstant: toggleSize.height).isActive = true
     }
 
+    private func configurePermissionStatusLabel(_ label: NSTextField) {
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        label.textColor = .secondaryLabelColor
+        label.alignment = .right
+        label.lineBreakMode = .byTruncatingTail
+        label.maximumNumberOfLines = 1
+        label.widthAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
+    }
+
+    private func configurePermissionActionButton(_ button: NSButton, action: Selector) {
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.bezelStyle = .rounded
+        button.target = self
+        button.action = action
+    }
+
+    private func makePermissionControl(statusLabel: NSTextField, button: NSButton) -> NSView {
+        let stack = NSStackView(views: [statusLabel, button])
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        stack.setContentHuggingPriority(.required, for: .horizontal)
+        stack.setContentCompressionResistancePriority(.required, for: .horizontal)
+        return stack
+    }
+
     private func preferencesBackgroundColor() -> NSColor {
-        return NSColor.windowBackgroundColor
+        NSColor.controlBackgroundColor.withAlphaComponent(0.55)
     }
 
     private func settingsCardBackgroundColor() -> NSColor {
-        NSColor.alternatingContentBackgroundColors.last ?? NSColor.controlBackgroundColor
+        let appearance = window?.effectiveAppearance ?? NSApp.effectiveAppearance
+        let isDarkMode = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        if isDarkMode {
+            return NSColor.white.withAlphaComponent(0.035)
+        }
+        return NSColor.black.withAlphaComponent(0.04)
     }
 
     private func settingsSeparatorColor() -> NSColor {
-        NSColor.separatorColor
+        NSColor.separatorColor.withAlphaComponent(0.1)
+    }
+
+    private func applyLiquidStyle(
+        _ effectView: NSVisualEffectView,
+        overlayColor: NSColor,
+        cornerRadius: CGFloat,
+        material: NSVisualEffectView.Material = .windowBackground,
+        blendingMode: NSVisualEffectView.BlendingMode = .withinWindow
+    ) {
+        effectView.material = material
+        effectView.state = .active
+        effectView.blendingMode = blendingMode
+        effectView.wantsLayer = true
+        effectView.layer?.backgroundColor = overlayColor.cgColor
+        effectView.layer?.cornerRadius = cornerRadius
+        effectView.layer?.masksToBounds = cornerRadius > 0
     }
 
     private func syncShortcutSelection() {
@@ -358,6 +518,53 @@ class PreferencesWindowController: NSWindowController {
 
     private func syncMicrophoneChimePreference() {
         microphoneChimeSwitch.state = MicrophoneChimePreference.load() ? .on : .off
+    }
+
+    private func bindPermissionUpdates() {
+        permissionsCoordinator.$snapshot
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] snapshot in
+                self?.applyPermissionSnapshot(snapshot)
+            }
+            .store(in: &cancellables)
+
+        applyPermissionSnapshot(permissionsCoordinator.snapshot)
+    }
+
+    private func applyPermissionSnapshot(_ snapshot: PermissionSnapshot) {
+        let accessibilityStatus = snapshot.accessibilityGranted
+            ? "Granted"
+            : "Not granted"
+        accessibilityPermissionLabel.stringValue = accessibilityStatus
+        accessibilityPermissionLabel.textColor = snapshot.accessibilityGranted
+            ? .systemGreen
+            : .systemOrange
+        accessibilityPermissionButton.title = snapshot.accessibilityGranted
+            ? "Open Settings"
+            : "Grant"
+
+        switch snapshot.microphoneStatus {
+        case .authorized:
+            microphonePermissionLabel.stringValue = "Granted"
+            microphonePermissionLabel.textColor = .systemGreen
+            microphonePermissionButton.title = "Open Settings"
+        case .notDetermined:
+            microphonePermissionLabel.stringValue = "Not determined"
+            microphonePermissionLabel.textColor = .systemOrange
+            microphonePermissionButton.title = "Allow"
+        case .denied:
+            microphonePermissionLabel.stringValue = "Denied"
+            microphonePermissionLabel.textColor = .systemRed
+            microphonePermissionButton.title = "Open Settings"
+        case .restricted:
+            microphonePermissionLabel.stringValue = "Restricted"
+            microphonePermissionLabel.textColor = .systemRed
+            microphonePermissionButton.title = "Open Settings"
+        @unknown default:
+            microphonePermissionLabel.stringValue = "Unknown"
+            microphonePermissionLabel.textColor = .secondaryLabelColor
+            microphonePermissionButton.title = "Open Settings"
+        }
     }
 
     @objc private func shortcutChanged(_ sender: NSPopUpButton) {
@@ -580,13 +787,32 @@ class PreferencesWindowController: NSWindowController {
         MicrophoneChimePreference.save(sender.state == .on)
     }
 
+    @objc private func accessibilityPermissionButtonPressed() {
+        if permissionsCoordinator.accessibilityGranted {
+            permissionsCoordinator.openAccessibilitySettings()
+            return
+        }
+
+        permissionsCoordinator.promptAccessibility()
+    }
+
+    @objc private func microphonePermissionButtonPressed() {
+        if permissionsCoordinator.microphoneStatus == .notDetermined {
+            Task { [weak self] in
+                _ = await self?.permissionsCoordinator.requestMicrophoneAccessIfNeeded()
+            }
+            return
+        }
+
+        permissionsCoordinator.openMicrophoneSettings()
+    }
+
     @objc private func checkForUpdates() {
         guard let window = window else { return }
-        let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "Unknown"
 
         let alert = NSAlert()
         alert.messageText = "VoiceClutch is up to date"
-        alert.informativeText = "You are running the latest release.\nCurrent version: \(currentVersion)"
+        alert.informativeText = "You are running the latest release."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         alert.beginSheetModal(for: window)
@@ -602,6 +828,7 @@ class PreferencesWindowController: NSWindowController {
         syncClipboardRecoveryPreference()
         syncMediaPausePreference()
         syncMicrophoneChimePreference()
+        permissionsCoordinator.refreshNow()
         enforceFixedWindowFrame()
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

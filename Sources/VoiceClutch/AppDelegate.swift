@@ -15,14 +15,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let dictationController = DictationController()
     private let hotkeyManager = HotkeyManager()
     private let mediaPlaybackController = MediaPlaybackController()
+    private let permissionsCoordinator = PermissionsCoordinator()
     private var statusBarController: StatusBarController?
     private var currentInteractionMode = ListeningInteractionMode.load()
     private var currentListeningShortcut = ListeningShortcut.load()
     private var currentListeningShortcutConfig: HotkeyConfig = ListeningShortcut.load().hotkeyConfig
-    private var permissionCheckTimer: Timer?
+    private var lastPermissionSnapshot: PermissionSnapshot?
+    private var hotkeyRecoveryTimer: Timer?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var isListeningHotkeyHeld = false
     private var shouldPlayStopChimeForCurrentSession = false
+    private var hasCompletedInitialPreparation = false
+    private var hasShownHotkeyRecoveryNotification = false
+
+    private enum DefaultsKeys {
+        static let didRequestInitialPermissions = "dev.vm.voiceclutch.didRequestInitialPermissions"
+    }
+
+    private enum NotificationMessage {
+        static let hotkeyActivationReady = "Listening shortcut is active."
+        static let hotkeyWaitingForAccessibility = "Waiting for Accessibility permission. VoiceClutch will retry automatically."
+        static let hotkeyRevoked = "Accessibility permission revoked. Listening shortcut is disabled."
+        static let hotkeyNeedsAccessibility = "Enable Accessibility permission to activate the listening shortcut."
+        static let hotkeyRequiresAccessibility = "Accessibility permission is required for global hotkeys."
+        static let hotkeyInvalidShortcut = "Could not register listening shortcut. Choose another key combination."
+        static let micPermissionPending = "Microphone permission is pending. Open Preferences > Permissions."
+        static let micPermissionDenied = "Microphone permission is denied. Open Preferences > Permissions."
+        static let micPermissionUnknown = "Microphone permission status is unknown."
+    }
 
     // MARK: - Lifecycle
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -33,10 +53,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupDictationController()
         setupStateObserving()
         setupMemoryPressureMonitoring()
+        setupPermissionMonitoring()
 
-        // Check accessibility permissions - this will start the permission checking loop
-        Task {
-            await checkAccessibilityPermissions()
+        Task { [weak self] in
+            await self?.runInitialPermissionOnboardingIfNeeded()
         }
     }
 
@@ -119,8 +139,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         hotkeyManager.unregister()
-        permissionCheckTimer?.invalidate()
-        permissionCheckTimer = nil
+        hotkeyRecoveryTimer?.invalidate()
+        hotkeyRecoveryTimer = nil
+        permissionsCoordinator.stopMonitoring()
         memoryPressureSource?.cancel()
         memoryPressureSource = nil
         resumeMediaIfNeeded()
@@ -135,7 +156,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             },
             onInteractionModeChanged: { [weak self] mode in
                 self?.applyListeningInteractionMode(mode)
-            }
+            },
+            permissionsCoordinator: permissionsCoordinator
         )
     }
 
@@ -156,32 +178,75 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &cancellables)
     }
 
-    private func setupHotkey() {
-        applyListeningShortcut(ListeningShortcut.load(), force: true)
-    }
-
-    private func attemptHotkeyRegistration(config: HotkeyConfig, attempt: Int, maxAttempts: Int) {
-        let success = hotkeyManager.register(config: config) { [weak self] eventType in
+    @discardableResult
+    private func registerHotkey(config: HotkeyConfig) -> Bool {
+        hotkeyManager.register(config: config) { [weak self] eventType in
             DispatchQueue.main.async {
                 self?.handleHotkeyEvent(eventType)
             }
         }
+    }
 
-        if success {
+    private func startHotkeyRecoveryLoopIfNeeded() {
+        guard hotkeyRecoveryTimer == nil else {
             return
         }
 
-        if attempt < maxAttempts {
-            // Retry after a short delay
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                self?.attemptHotkeyRegistration(config: config, attempt: attempt + 1, maxAttempts: maxAttempts)
+        hotkeyRecoveryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.retryHotkeyRegistrationIfNeeded()
             }
+        }
+    }
+
+    private func stopHotkeyRecoveryLoop() {
+        hotkeyRecoveryTimer?.invalidate()
+        hotkeyRecoveryTimer = nil
+    }
+
+    private func retryHotkeyRegistrationIfNeeded() {
+        guard permissionsCoordinator.accessibilityGranted else {
+            stopHotkeyRecoveryLoop()
             return
         }
 
+        ensureHotkeyRegistered(showFailureNotification: false)
+    }
+
+    private func ensureHotkeyRegistered(showFailureNotification: Bool) {
+        guard permissionsCoordinator.accessibilityGranted else {
+            stopHotkeyRecoveryLoop()
+            return
+        }
+
+        let config = currentListeningShortcutConfig
+        guard config.isValid else {
+            hotkeyManager.unregister()
+            stopHotkeyRecoveryLoop()
+            hasShownHotkeyRecoveryNotification = false
+            statusBarController?.showToolbarNotification(NotificationMessage.hotkeyInvalidShortcut)
+            return
+        }
+
+        let success = registerHotkey(config: config)
+        if success {
+            stopHotkeyRecoveryLoop()
+            if hasShownHotkeyRecoveryNotification {
+                statusBarController?.showToolbarNotification(NotificationMessage.hotkeyActivationReady)
+            }
+            hasShownHotkeyRecoveryNotification = false
+            return
+        }
+
+        startHotkeyRecoveryLoopIfNeeded()
+        guard showFailureNotification, !hasShownHotkeyRecoveryNotification else {
+            return
+        }
+
+        hasShownHotkeyRecoveryNotification = true
         print("❌ Failed to register listening shortcut: \(config.displayText)")
         statusBarController?.showToolbarNotification(
-            "Could not register listening shortcut: \(config.displayText). Choose another key combination."
+            NotificationMessage.hotkeyWaitingForAccessibility
         )
     }
 
@@ -196,7 +261,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         currentListeningShortcut = shortcut
         currentListeningShortcutConfig = config
-        attemptHotkeyRegistration(config: config, attempt: 1, maxAttempts: 5)
+        guard permissionsCoordinator.accessibilityGranted else {
+            hotkeyManager.unregister()
+            stopHotkeyRecoveryLoop()
+            return
+        }
+
+        ensureHotkeyRegistered(showFailureNotification: true)
     }
 
     private func setupStateObserving() {
@@ -231,55 +302,86 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         _ = dictationController.compactMemoryIfIdle()
     }
 
-    // MARK: - Accessibility Permissions
-    private func checkAccessibilityPermissions() async {
-        // Use a mutable dictionary with proper bridging for concurrency safety
-        let options = NSMutableDictionary()
-        options.setObject(false, forKey: "AXTrustedCheckOptionPrompt" as NSString)
-        let accessibilityEnabled = AXIsProcessTrustedWithOptions(options)
-
-        if accessibilityEnabled {
-            // Permissions granted, proceed with initialization
-            await onPermissionsGranted()
-        } else {
-            // Show native permissions request
-            let promptOptions = NSMutableDictionary()
-            promptOptions.setObject(true, forKey: "AXTrustedCheckOptionPrompt" as NSString)
-            AXIsProcessTrustedWithOptions(promptOptions)
-
-            // Start checking loop to wait for user to grant permissions
-            startPermissionCheckLoop()
-        }
-    }
-
-    private func startPermissionCheckLoop() {
-        // Start a timer to check permissions every 2 seconds
-        permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
-                await self?.checkPermissionsPeriodically()
+    // MARK: - Permissions
+    private func setupPermissionMonitoring() {
+        permissionsCoordinator.$snapshot
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] snapshot in
+                self?.handlePermissionSnapshotUpdate(snapshot)
             }
+            .store(in: &cancellables)
+
+        permissionsCoordinator.startMonitoring()
+        handlePermissionSnapshotUpdate(permissionsCoordinator.snapshot)
+    }
+
+    private func handlePermissionSnapshotUpdate(_ snapshot: PermissionSnapshot) {
+        let previousSnapshot = lastPermissionSnapshot
+        lastPermissionSnapshot = snapshot
+
+        if snapshot.accessibilityGranted && !hasCompletedInitialPreparation {
+            ensureModelsPrepared()
+        }
+
+        guard let previousSnapshot else {
+            if snapshot.accessibilityGranted {
+                ensureHotkeyRegistered(showFailureNotification: false)
+            }
+            return
+        }
+
+        if previousSnapshot.accessibilityGranted == snapshot.accessibilityGranted {
+            return
+        }
+
+        if snapshot.accessibilityGranted {
+            ensureHotkeyRegistered(showFailureNotification: true)
+            statusBarController?.showToolbarNotification("Accessibility permission granted.")
+            return
+        }
+
+        hotkeyManager.unregister()
+        stopHotkeyRecoveryLoop()
+        hasShownHotkeyRecoveryNotification = false
+        statusBarController?.showToolbarNotification(
+            NotificationMessage.hotkeyRevoked
+        )
+    }
+
+    private func ensureModelsPrepared() {
+        guard !hasCompletedInitialPreparation else {
+            return
+        }
+
+        hasCompletedInitialPreparation = true
+        Task { [weak self] in
+            await self?.checkAndDownloadModels()
         }
     }
 
-    private func checkPermissionsPeriodically() async {
-        let options = NSMutableDictionary()
-        options.setObject(false, forKey: "AXTrustedCheckOptionPrompt" as NSString)
-        let accessibilityEnabled: Bool = AXIsProcessTrustedWithOptions(options)
+    private func runInitialPermissionOnboardingIfNeeded() async {
+        let defaults = UserDefaults.standard
+        let hasRequestedPermissions = defaults.bool(forKey: DefaultsKeys.didRequestInitialPermissions)
 
-        if accessibilityEnabled {
-            // Stop the timer
-            permissionCheckTimer?.invalidate()
-            permissionCheckTimer = nil
+        if !hasRequestedPermissions {
+            if !permissionsCoordinator.accessibilityGranted {
+                permissionsCoordinator.promptAccessibility()
+            }
 
-            // Proceed with initialization
-            await onPermissionsGranted()
+            _ = await permissionsCoordinator.requestMicrophoneAccessIfNeeded()
+            defaults.set(true, forKey: DefaultsKeys.didRequestInitialPermissions)
         }
-    }
 
-    private func onPermissionsGranted() async {
-        // Now that we have permissions, complete the initialization
-        setupHotkey()
-        await checkAndDownloadModels()
+        permissionsCoordinator.refreshNow()
+
+        guard permissionsCoordinator.accessibilityGranted else {
+            statusBarController?.showToolbarNotification(
+                NotificationMessage.hotkeyNeedsAccessibility
+            )
+            return
+        }
+
+        ensureHotkeyRegistered(showFailureNotification: true)
     }
 
     // MARK: - Hotkey Handling
@@ -399,11 +501,46 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return false
         }
 
+        guard permissionsCoordinator.accessibilityGranted else {
+            statusBarController?.showToolbarNotification(
+                NotificationMessage.hotkeyRequiresAccessibility
+            )
+            return false
+        }
+
+        switch permissionsCoordinator.microphoneStatus {
+        case .authorized:
+            break
+        case .notDetermined:
+            statusBarController?.showToolbarNotification(
+                NotificationMessage.micPermissionPending
+            )
+            Task { [weak self] in
+                _ = await self?.permissionsCoordinator.requestMicrophoneAccessIfNeeded()
+            }
+            return false
+        case .denied, .restricted:
+            statusBarController?.showToolbarNotification(
+                NotificationMessage.micPermissionDenied
+            )
+            return false
+        @unknown default:
+            statusBarController?.showToolbarNotification(
+                NotificationMessage.micPermissionUnknown
+            )
+            return false
+        }
+
         // Start audio recording
         do {
             try dictationController.startRecording()
             return true
         } catch {
+            if let audioError = error as? AudioError, case .permissionDenied = audioError {
+                statusBarController?.showToolbarNotification(
+                    NotificationMessage.micPermissionDenied
+                )
+            }
             print("❌ Failed to start recording: \(error)")
             return false
         }
