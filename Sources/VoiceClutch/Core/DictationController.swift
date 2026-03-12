@@ -133,7 +133,8 @@ public final class DictationController: ObservableObject {
             processingTimeoutTask?.cancel()
             processingTimeoutTask = nil
             let normalizedFinalText = TextInjector.normalizedStreamingTranscript(text)
-            let finalText = !normalizedFinalText.isEmpty ? normalizedFinalText : latestPartialText
+            let stabilizedFinalText = stabilizedTranscript(normalizedFinalText, previous: latestPartialText)
+            let finalText = !stabilizedFinalText.isEmpty ? stabilizedFinalText : latestPartialText
             TextInjector.commitStreamingFinalNormalized(finalText)
             resetPartialState()
             state = .idle
@@ -152,9 +153,10 @@ public final class DictationController: ObservableObject {
             return
         }
 
-        latestPartialText = normalizedPartialText
-        guard shouldInjectPartial(normalizedPartialText) else { return }
-        TextInjector.updateStreamingPartialNormalized(normalizedPartialText)
+        let stabilizedPartialText = stabilizedTranscript(normalizedPartialText, previous: latestPartialText)
+        latestPartialText = stabilizedPartialText
+        guard shouldInjectPartial(stabilizedPartialText) else { return }
+        TextInjector.updateStreamingPartialNormalized(stabilizedPartialText)
     }
 
     private func resetPartialState() {
@@ -166,5 +168,70 @@ public final class DictationController: ObservableObject {
         guard text != lastInjectedPartialText else { return false }
         lastInjectedPartialText = text
         return true
+    }
+
+    private func stabilizedTranscript(_ candidate: String, previous: String) -> String {
+        guard !candidate.isEmpty, !previous.isEmpty else {
+            return candidate
+        }
+
+        guard candidate.hasPrefix(previous) else {
+            return candidate
+        }
+
+        let suffixStart = candidate.index(candidate.startIndex, offsetBy: previous.count)
+        let suffix = String(candidate[suffixStart...])
+        guard let overlapLength = duplicatedJoinOverlapLength(previous: previous, suffix: suffix) else {
+            return candidate
+        }
+
+        let trimmedSuffixStart = suffix.index(suffix.startIndex, offsetBy: overlapLength)
+        let stabilized = previous + suffix[trimmedSuffixStart...]
+        return stabilized.count < candidate.count ? stabilized : candidate
+    }
+
+    private func duplicatedJoinOverlapLength(previous: String, suffix: String) -> Int? {
+        guard !suffix.isEmpty else { return nil }
+
+        let maxOverlap = min(previous.count, suffix.count)
+        guard maxOverlap >= 3 else { return nil }
+
+        for overlapLength in stride(from: maxOverlap, through: 3, by: -1) {
+            let previousStart = previous.index(previous.endIndex, offsetBy: -overlapLength)
+            let previousOverlap = previous[previousStart...]
+            let suffixEnd = suffix.index(suffix.startIndex, offsetBy: overlapLength)
+            let suffixOverlap = suffix[..<suffixEnd]
+
+            guard previousOverlap.caseInsensitiveCompare(String(suffixOverlap)) == .orderedSame else {
+                continue
+            }
+
+            guard hasWordBoundary(before: previousStart, in: previous) else {
+                continue
+            }
+
+            guard hasWordBoundary(after: suffixEnd, in: suffix) else {
+                continue
+            }
+
+            return overlapLength
+        }
+
+        return nil
+    }
+
+    private func hasWordBoundary(before index: String.Index, in text: String) -> Bool {
+        guard index > text.startIndex else { return true }
+        let precedingIndex = text.index(before: index)
+        return !isAlphaNumeric(text[precedingIndex])
+    }
+
+    private func hasWordBoundary(after index: String.Index, in text: String) -> Bool {
+        guard index < text.endIndex else { return true }
+        return !isAlphaNumeric(text[index])
+    }
+
+    private func isAlphaNumeric(_ character: Character) -> Bool {
+        character.unicodeScalars.contains { CharacterSet.alphanumerics.contains($0) }
     }
 }

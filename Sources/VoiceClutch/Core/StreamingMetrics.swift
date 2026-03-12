@@ -5,6 +5,12 @@ public struct StreamingMetricsSnapshot: Sendable {
     public let partialsReceived: Int
     public let partialsEmitted: Int
     public let rewriteCount: Int
+    public let triggerToRecordingStartMs: Double
+    public let triggerToAudioEngineStartMs: Double
+    public let triggerToFirstTapMs: Double
+    public let triggerToASRStreamReadyMs: Double
+    public let triggerToFirstPartialMs: Double
+    public let bufferedSamplesFlushedOnStreamReady: Int
     public let tapToIngestEnqueueAverageMs: Double
     public let tapToIngestEnqueueMaxMs: Double
     public let lastStopToFinalMs: Double
@@ -18,6 +24,13 @@ final class StreamingMetrics: @unchecked Sendable {
     private var partialsReceived = 0
     private var partialsEmitted = 0
     private var rewriteCount = 0
+    private var triggerPressedUptime: TimeInterval?
+    private var triggerToRecordingStartMs = 0.0
+    private var triggerToAudioEngineStartMs = 0.0
+    private var triggerToFirstTapMs = 0.0
+    private var triggerToASRStreamReadyMs = 0.0
+    private var triggerToFirstPartialMs = 0.0
+    private var bufferedSamplesFlushedOnStreamReady = 0
     private var tapToIngestEnqueueTotalMs = 0.0
     private var tapToIngestEnqueueSamples = 0
     private var tapToIngestEnqueueMaxMs = 0.0
@@ -28,15 +41,61 @@ final class StreamingMetrics: @unchecked Sendable {
 
     func resetForSession() {
         lock.lock()
-        ingestChunks = 0
-        partialsReceived = 0
-        partialsEmitted = 0
-        rewriteCount = 0
-        tapToIngestEnqueueTotalMs = 0
-        tapToIngestEnqueueSamples = 0
-        tapToIngestEnqueueMaxMs = 0
-        stopRequestedUptime = nil
-        lastStopToFinalMs = 0
+        resetSessionState(preservingTrigger: false)
+        lock.unlock()
+    }
+
+    func markTriggerPressed() {
+        lock.lock()
+        resetSessionState(preservingTrigger: false)
+        triggerPressedUptime = ProcessInfo.processInfo.systemUptime
+        lock.unlock()
+    }
+
+    func beginSession() {
+        lock.lock()
+        resetSessionState(preservingTrigger: true)
+        lock.unlock()
+    }
+
+    func markRecordingStart() {
+        lock.lock()
+        if triggerToRecordingStartMs == 0 {
+            triggerToRecordingStartMs = elapsedSinceTriggerLocked()
+        }
+        lock.unlock()
+    }
+
+    func markAudioEngineStarted() {
+        lock.lock()
+        if triggerToAudioEngineStartMs == 0 {
+            triggerToAudioEngineStartMs = elapsedSinceTriggerLocked()
+        }
+        lock.unlock()
+    }
+
+    func markFirstTapReceived() {
+        lock.lock()
+        if triggerToFirstTapMs == 0 {
+            triggerToFirstTapMs = elapsedSinceTriggerLocked()
+        }
+        lock.unlock()
+    }
+
+    func markASRStreamReady(bufferedSamplesFlushed: Int) {
+        lock.lock()
+        bufferedSamplesFlushedOnStreamReady = bufferedSamplesFlushed
+        if triggerToASRStreamReadyMs == 0 {
+            triggerToASRStreamReadyMs = elapsedSinceTriggerLocked()
+        }
+        lock.unlock()
+    }
+
+    func markFirstPartialEmitted() {
+        lock.lock()
+        if triggerToFirstPartialMs == 0 {
+            triggerToFirstPartialMs = elapsedSinceTriggerLocked()
+        }
         lock.unlock()
     }
 
@@ -97,11 +156,42 @@ final class StreamingMetrics: @unchecked Sendable {
             partialsReceived: partialsReceived,
             partialsEmitted: partialsEmitted,
             rewriteCount: rewriteCount,
+            triggerToRecordingStartMs: triggerToRecordingStartMs,
+            triggerToAudioEngineStartMs: triggerToAudioEngineStartMs,
+            triggerToFirstTapMs: triggerToFirstTapMs,
+            triggerToASRStreamReadyMs: triggerToASRStreamReadyMs,
+            triggerToFirstPartialMs: triggerToFirstPartialMs,
+            bufferedSamplesFlushedOnStreamReady: bufferedSamplesFlushedOnStreamReady,
             tapToIngestEnqueueAverageMs: averageMs,
             tapToIngestEnqueueMaxMs: tapToIngestEnqueueMaxMs,
             lastStopToFinalMs: lastStopToFinalMs
         )
         lock.unlock()
         return snapshot
+    }
+
+    private func resetSessionState(preservingTrigger: Bool) {
+        let existingTriggerUptime = preservingTrigger ? triggerPressedUptime : nil
+        ingestChunks = 0
+        partialsReceived = 0
+        partialsEmitted = 0
+        rewriteCount = 0
+        triggerPressedUptime = existingTriggerUptime
+        triggerToRecordingStartMs = 0
+        triggerToAudioEngineStartMs = 0
+        triggerToFirstTapMs = 0
+        triggerToASRStreamReadyMs = 0
+        triggerToFirstPartialMs = 0
+        bufferedSamplesFlushedOnStreamReady = 0
+        tapToIngestEnqueueTotalMs = 0
+        tapToIngestEnqueueSamples = 0
+        tapToIngestEnqueueMaxMs = 0
+        stopRequestedUptime = nil
+        lastStopToFinalMs = 0
+    }
+
+    private func elapsedSinceTriggerLocked() -> Double {
+        guard let triggerPressedUptime else { return 0 }
+        return max(0, (ProcessInfo.processInfo.systemUptime - triggerPressedUptime) * 1_000)
     }
 }

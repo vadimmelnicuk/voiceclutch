@@ -17,13 +17,19 @@ class StatusBarController: NSObject {
     private var notificationPopover: NSPopover?
     private var notificationDismissWorkItem: DispatchWorkItem?
 
-    init(onShortcutChanged: @escaping @MainActor (ListeningShortcut) -> Void) {
+    init(
+        onShortcutChanged: @escaping @MainActor (ListeningShortcut) -> Void,
+        onInteractionModeChanged: @escaping @MainActor (ListeningInteractionMode) -> Void
+    ) {
         // Use a square status item when showing an icon.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
 
         // Setup menu
         menu = NSMenu()
-        preferencesWindowController = PreferencesWindowController(onShortcutChanged: onShortcutChanged)
+        preferencesWindowController = PreferencesWindowController(
+            onShortcutChanged: onShortcutChanged,
+            onInteractionModeChanged: onInteractionModeChanged
+        )
         toolbarIcon = Self.loadToolbarIcon()
         activeListeningToolbarIcon = toolbarIcon.flatMap {
             Self.maskedToolbarIcon(from: $0, color: NSColor(srgbRed: 1.0, green: 0.6, blue: 0.0, alpha: 1.0))

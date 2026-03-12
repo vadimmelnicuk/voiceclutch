@@ -17,6 +17,7 @@ public class AudioManager: @unchecked Sendable {
     private var onTranscription: (@Sendable (String, Bool) -> Void)?
     private let stateLock = NSLock()
     private var isRecording = false
+    private var isStreamingSessionReady = false
 
     /// Serial chain for async ASR operations (ingest/finish/reset).
     private let streamingOperationLock = NSLock()
@@ -84,7 +85,8 @@ public class AudioManager: @unchecked Sendable {
             throw AudioError.alreadyRecording
         }
 
-        StreamingMetrics.shared.resetForSession()
+        StreamingMetrics.shared.beginSession()
+        StreamingMetrics.shared.markRecordingStart()
 
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
@@ -113,19 +115,10 @@ public class AudioManager: @unchecked Sendable {
             if pendingStreamingSamples.capacity < (streamingIngestChunkSize * 4) {
                 pendingStreamingSamples.reserveCapacity(streamingIngestChunkSize * 4)
             }
+            isRecording = true
+            isStreamingSessionReady = false
             isFinalizingRecording = false
             onTranscription = callback
-        }
-
-        do {
-            try beginStreamingSession(callback: callback)
-        } catch {
-            withStateLock {
-                audioBuffer.removeAll(keepingCapacity: true)
-                pendingStreamingSamples.removeAll(keepingCapacity: true)
-                onTranscription = nil
-            }
-            throw error
         }
 
         inputNode.installTap(onBus: 0, bufferSize: inputTapBufferSize, format: format) { [weak self] buffer, _ in
@@ -141,11 +134,11 @@ public class AudioManager: @unchecked Sendable {
         do {
             try engine.start()
             audioEngine = engine
-            withStateLock {
-                isRecording = true
-            }
+            StreamingMetrics.shared.markAudioEngineStarted()
         } catch {
             withStateLock {
+                isRecording = false
+                isStreamingSessionReady = false
                 audioBuffer.removeAll(keepingCapacity: true)
                 pendingStreamingSamples.removeAll(keepingCapacity: true)
                 onTranscription = nil
@@ -153,6 +146,22 @@ public class AudioManager: @unchecked Sendable {
             inputNode.removeTap(onBus: 0)
             resetStreamingSession()
             throw AudioError.engineStartFailed(error.localizedDescription)
+        }
+
+        do {
+            try beginStreamingSession(callback: callback)
+        } catch {
+            withStateLock {
+                isRecording = false
+                isStreamingSessionReady = false
+                isFinalizingRecording = false
+                audioBuffer.removeAll(keepingCapacity: true)
+                pendingStreamingSamples.removeAll(keepingCapacity: true)
+                onTranscription = nil
+            }
+            stopAudioEngine()
+            resetStreamingSession()
+            throw error
         }
     }
 
@@ -183,6 +192,7 @@ public class AudioManager: @unchecked Sendable {
 
             isFinalizingRecording = false
             isRecording = false
+            isStreamingSessionReady = false
             audioBuffer.removeAll(keepingCapacity: true)
             pendingStreamingSamples.removeAll(keepingCapacity: true)
             onTranscription = nil
@@ -206,6 +216,7 @@ public class AudioManager: @unchecked Sendable {
             let bufferedAudio = audioBuffer
             let callback = onTranscription
             isRecording = false
+            isStreamingSessionReady = false
             isFinalizingRecording = false
             audioBuffer.removeAll(keepingCapacity: true)
             onTranscription = nil
@@ -228,6 +239,7 @@ public class AudioManager: @unchecked Sendable {
         if !preparation.shouldTranscribe {
             resetStreamingSession()
             StreamingMetrics.shared.markFinalDelivered()
+            debugLogStreamingMetricsIfNeeded()
             finalizationState.callback?("", true)
             return
         }
@@ -241,6 +253,7 @@ public class AudioManager: @unchecked Sendable {
 
         guard let asrProcessor else {
             StreamingMetrics.shared.markFinalDelivered()
+            debugLogStreamingMetricsIfNeeded()
             finalizationState.callback?("", true)
             return
         }
@@ -281,6 +294,7 @@ public class AudioManager: @unchecked Sendable {
 
             await MainActor.run {
                 StreamingMetrics.shared.markFinalDelivered()
+                self.debugLogStreamingMetricsIfNeeded()
                 finalizationState.callback?(transcription, true)
             }
         }
@@ -297,6 +311,8 @@ public class AudioManager: @unchecked Sendable {
         guard buffer.frameLength > 0 else {
             return
         }
+
+        StreamingMetrics.shared.markFirstTapReceived()
 
         // Calculate required frame capacity.
         let inputFrameLength = Double(buffer.frameLength)
@@ -370,6 +386,8 @@ public class AudioManager: @unchecked Sendable {
                 callback(partialText, false)
             }
         }
+
+        activateStreamingSession(asrProcessor: asrProcessor)
     }
 
     private func enqueueStreamingSamples(_ samples: [Float]) {
@@ -381,6 +399,9 @@ public class AudioManager: @unchecked Sendable {
             }
 
             pendingStreamingSamples.append(contentsOf: samples)
+            guard isStreamingSessionReady else {
+                return nil
+            }
             guard pendingStreamingSamples.count >= streamingIngestChunkSize else {
                 return nil
             }
@@ -393,18 +414,12 @@ public class AudioManager: @unchecked Sendable {
 
         guard let chunk else { return }
 
-        StreamingMetrics.shared.incrementIngestChunks()
-        enqueueStreamingOperation {
-            do {
-                try await asrProcessor.ingest(samples: chunk)
-            } catch {
-                print("❌ ASR ingest failed: \(error)")
-            }
-        }
+        enqueueIngestOperation(samples: chunk, asrProcessor: asrProcessor, errorLabel: "ASR ingest failed")
     }
 
     private func resetStreamingSession() {
         withStateLock {
+            isStreamingSessionReady = false
             pendingStreamingSamples.removeAll(keepingCapacity: true)
         }
 
@@ -425,6 +440,51 @@ public class AudioManager: @unchecked Sendable {
             pending.reserveCapacity(pendingStreamingSamples.count)
             swap(&pending, &pendingStreamingSamples)
             return pending
+        }
+    }
+
+    private func activateStreamingSession(asrProcessor: ASRProcessor) {
+        let startupBufferedSamples = consumePendingStreamingSamples()
+        if !startupBufferedSamples.isEmpty {
+            enqueueIngestOperation(
+                samples: startupBufferedSamples,
+                asrProcessor: asrProcessor,
+                errorLabel: "ASR startup ingest failed"
+            )
+        }
+
+        withStateLock {
+            isStreamingSessionReady = true
+        }
+
+        StreamingMetrics.shared.markASRStreamReady(
+            bufferedSamplesFlushed: startupBufferedSamples.count
+        )
+
+        let postReadySamples = consumePendingStreamingSamples()
+        if !postReadySamples.isEmpty {
+            enqueueIngestOperation(
+                samples: postReadySamples,
+                asrProcessor: asrProcessor,
+                errorLabel: "ASR post-ready ingest failed"
+            )
+        }
+    }
+
+    private func enqueueIngestOperation(
+        samples: [Float],
+        asrProcessor: ASRProcessor,
+        errorLabel: String
+    ) {
+        guard !samples.isEmpty else { return }
+
+        StreamingMetrics.shared.incrementIngestChunks()
+        enqueueStreamingOperation {
+            do {
+                try await asrProcessor.ingest(samples: samples)
+            } catch {
+                print("❌ \(errorLabel): \(error)")
+            }
         }
     }
 
@@ -485,6 +545,25 @@ public class AudioManager: @unchecked Sendable {
         return try operationResult.get()
     }
 
+    private func debugLogStreamingMetricsIfNeeded() {
+        #if DEBUG
+        let snapshot = StreamingMetrics.shared.snapshot()
+        print(
+            "⏱️ startup record=\(formatMetricMs(snapshot.triggerToRecordingStartMs)) " +
+            "engine=\(formatMetricMs(snapshot.triggerToAudioEngineStartMs)) " +
+            "tap=\(formatMetricMs(snapshot.triggerToFirstTapMs)) " +
+            "stream=\(formatMetricMs(snapshot.triggerToASRStreamReadyMs)) " +
+            "partial=\(formatMetricMs(snapshot.triggerToFirstPartialMs)) " +
+            "flush=\(snapshot.bufferedSamplesFlushedOnStreamReady) samples " +
+            "stopToFinal=\(formatMetricMs(snapshot.lastStopToFinalMs))"
+        )
+        #endif
+    }
+
+    private func formatMetricMs(_ value: Double) -> String {
+        "\(Int(value.rounded()))ms"
+    }
+
     /// Get current audio buffer (for debugging).
     public func getCurrentBuffer() -> [Float] {
         withStateLock { audioBuffer }
@@ -512,6 +591,7 @@ public class AudioManager: @unchecked Sendable {
             }
 
             audioBuffer.removeAll(keepingCapacity: false)
+            isStreamingSessionReady = false
             pendingStreamingSamples.removeAll(keepingCapacity: false)
             return true
         }

@@ -16,12 +16,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let hotkeyManager = HotkeyManager()
     private let mediaPlaybackController = MediaPlaybackController()
     private var statusBarController: StatusBarController?
+    private var currentInteractionMode = ListeningInteractionMode.load()
     private var currentListeningShortcut = ListeningShortcut.load()
     private var currentListeningShortcutConfig: HotkeyConfig = ListeningShortcut.load().hotkeyConfig
     private var permissionCheckTimer: Timer?
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var isListeningHotkeyHeld = false
-    private var shouldPlayReleaseChimeForCurrentHold = false
+    private var shouldPlayStopChimeForCurrentSession = false
 
     // MARK: - Lifecycle
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -128,9 +129,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Setup
     private func setupStatusBar() {
-        statusBarController = StatusBarController { [weak self] shortcut in
-            self?.applyListeningShortcut(shortcut)
-        }
+        statusBarController = StatusBarController(
+            onShortcutChanged: { [weak self] shortcut in
+                self?.applyListeningShortcut(shortcut)
+            },
+            onInteractionModeChanged: { [weak self] mode in
+                self?.applyListeningInteractionMode(mode)
+            }
+        )
     }
 
     private func setupDictationController() {
@@ -175,8 +181,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         print("❌ Failed to register listening shortcut: \(config.displayText)")
         statusBarController?.showToolbarNotification(
-            "Could not register hold-to-talk shortcut: \(config.displayText). Choose another key combination."
+            "Could not register listening shortcut: \(config.displayText). Choose another key combination."
         )
+    }
+
+    func applyListeningInteractionMode(_ mode: ListeningInteractionMode) {
+        currentInteractionMode = mode
     }
 
     func applyListeningShortcut(_ shortcut: ListeningShortcut, force: Bool = false) {
@@ -276,42 +286,60 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleHotkeyEvent(_ eventType: HotkeyEventType) {
         switch eventType {
         case .pressed:
-            if currentState == .downloading || currentState == .loadingModel {
-                showNotReadyNotification()
-                return
-            }
-            guard currentState == .idle else { return }
-            guard dictationController.isReady else {
-                showNotReadyNotification()
-                return
-            }
-
-            isListeningHotkeyHeld = true
-            if MicrophoneChimePreference.load() {
-                MicrophoneChimePlayer.playPressChime()
-                shouldPlayReleaseChimeForCurrentHold = true
-            } else {
-                shouldPlayReleaseChimeForCurrentHold = false
-            }
-            Task { [weak self] in
-                await self?.beginListeningFromHotkeyPress()
-            }
+            handleHotkeyPressed()
         case .released:
-            isListeningHotkeyHeld = false
-            if shouldPlayReleaseChimeForCurrentHold {
-                MicrophoneChimePlayer.playReleaseChime()
-                shouldPlayReleaseChimeForCurrentHold = false
-            }
-
-            if currentState == .recording {
-                stopRecording()
-                resumeMediaIfNeeded()
-            }
+            handleHotkeyReleased()
         }
     }
 
     // MARK: - Recording Actions
-    private func beginListeningFromHotkeyPress() async {
+    private func handleHotkeyPressed() {
+        switch currentState {
+        case .downloading, .loadingModel:
+            showNotReadyNotification()
+            return
+        case .idle:
+            break
+        case .recording:
+            guard currentInteractionMode == .listenToggle else { return }
+            playStopChimeIfNeeded()
+            stopRecording()
+            resumeMediaIfNeeded()
+            return
+        case .processing:
+            return
+        }
+
+        guard dictationController.isReady else {
+            showNotReadyNotification()
+            return
+        }
+
+        StreamingMetrics.shared.markTriggerPressed()
+        isListeningHotkeyHeld = true
+        playStartChimeIfEnabled()
+
+        let requiresHeldHotkey = currentInteractionMode == .holdToTalk
+        Task { [weak self] in
+            await self?.beginListeningFromHotkeyTrigger(requiresHeldHotkey: requiresHeldHotkey)
+        }
+    }
+
+    private func handleHotkeyReleased() {
+        isListeningHotkeyHeld = false
+        guard currentInteractionMode == .holdToTalk else {
+            return
+        }
+
+        playStopChimeIfNeeded()
+
+        if currentState == .recording {
+            stopRecording()
+            resumeMediaIfNeeded()
+        }
+    }
+
+    private func beginListeningFromHotkeyTrigger(requiresHeldHotkey: Bool) async {
         guard currentState == .idle else { return }
 
         // Check if models are ready
@@ -320,23 +348,47 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        let shouldPauseMedia = ListeningMediaPreference.load()
-        let didPauseMedia = shouldPauseMedia
-            ? await mediaPlaybackController.pauseIfActive()
-            : false
-
-        guard isListeningHotkeyHeld, currentState == .idle else {
-            if didPauseMedia {
-                resumeMediaIfNeeded()
-            }
+        guard !requiresHeldHotkey || isListeningHotkeyHeld else {
             return
         }
 
         let didStartRecording = startRecordingIfReady()
 
-        if !didStartRecording, didPauseMedia {
-            resumeMediaIfNeeded()
+        guard didStartRecording else {
+            shouldPlayStopChimeForCurrentSession = false
+            return
         }
+
+        guard ListeningMediaPreference.load() else {
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+
+            let didPauseMedia = await self.mediaPlaybackController.pauseIfActive()
+            guard didPauseMedia else { return }
+
+            if self.currentState != .recording {
+                self.resumeMediaIfNeeded()
+            }
+        }
+    }
+
+    private func playStartChimeIfEnabled() {
+        guard MicrophoneChimePreference.load() else {
+            shouldPlayStopChimeForCurrentSession = false
+            return
+        }
+
+        MicrophoneChimePlayer.playPressChime()
+        shouldPlayStopChimeForCurrentSession = true
+    }
+
+    private func playStopChimeIfNeeded() {
+        guard shouldPlayStopChimeForCurrentSession else { return }
+        MicrophoneChimePlayer.playReleaseChime()
+        shouldPlayStopChimeForCurrentSession = false
     }
 
     @discardableResult

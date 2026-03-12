@@ -227,6 +227,7 @@ public actor ASRProcessor {
             lastPartialEmitTime = now
             lastEmittedPartial = text
             StreamingMetrics.shared.incrementPartialsEmitted()
+            StreamingMetrics.shared.markFirstPartialEmitted()
             partialHandler?(text)
             return
         }
@@ -262,6 +263,7 @@ public actor ASRProcessor {
         lastEmittedPartial = text
         lastPartialEmitTime = Date().timeIntervalSince1970
         StreamingMetrics.shared.incrementPartialsEmitted()
+        StreamingMetrics.shared.markFirstPartialEmitted()
         partialHandler?(text)
     }
 

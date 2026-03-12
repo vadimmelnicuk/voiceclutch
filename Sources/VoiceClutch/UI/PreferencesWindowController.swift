@@ -4,8 +4,9 @@ import AppKit
 class PreferencesWindowController: NSWindowController {
     private enum Layout {
         static let contentWidth: CGFloat = 520
-        static let contentHeight: CGFloat = 372
+        static let contentHeight: CGFloat = 432
         static let rowHeight: CGFloat = 52
+        static let interactionRowHeight: CGFloat = 78
     }
 
     private enum CustomShortcutCapture {
@@ -14,6 +15,9 @@ class PreferencesWindowController: NSWindowController {
     }
 
     private let onShortcutChanged: @MainActor (ListeningShortcut) -> Void
+    private let onInteractionModeChanged: @MainActor (ListeningInteractionMode) -> Void
+    private let holdToTalkRadioButton = NSButton(radioButtonWithTitle: "Hold-to-talk", target: nil, action: nil)
+    private let listenToggleRadioButton = NSButton(radioButtonWithTitle: "Press-to-talk", target: nil, action: nil)
     private let shortcutPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let clipboardRecoverySwitch = NSSwitch(frame: .zero)
     private let mediaPauseSwitch = NSSwitch(frame: .zero)
@@ -31,8 +35,12 @@ class PreferencesWindowController: NSWindowController {
         .custom
     ]
 
-    init(onShortcutChanged: @escaping @MainActor (ListeningShortcut) -> Void) {
+    init(
+        onShortcutChanged: @escaping @MainActor (ListeningShortcut) -> Void,
+        onInteractionModeChanged: @escaping @MainActor (ListeningInteractionMode) -> Void
+    ) {
         self.onShortcutChanged = onShortcutChanged
+        self.onInteractionModeChanged = onInteractionModeChanged
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: Layout.contentWidth, height: Layout.contentHeight),
             styleMask: [.titled, .closable],
@@ -72,6 +80,16 @@ class PreferencesWindowController: NSWindowController {
         settingsCard.layer?.cornerRadius = 12
         settingsCard.layer?.masksToBounds = true
 
+        let interactionModeControl = makeInteractionModeControl()
+        syncInteractionModeSelection()
+
+        let interactionModeRow = makeSettingsRow(
+            title: "Interaction",
+            detail: "Choose whether listening runs only while held or starts and stops with each press.",
+            control: interactionModeControl,
+            minimumHeight: Layout.interactionRowHeight
+        )
+
         shortcutPopup.translatesAutoresizingMaskIntoConstraints = false
         shortcutPopup.target = self
         shortcutPopup.action = #selector(shortcutChanged(_:))
@@ -85,8 +103,8 @@ class PreferencesWindowController: NSWindowController {
         shortcutPopup.widthAnchor.constraint(greaterThanOrEqualToConstant: 180).isActive = true
 
         let shortcutRow = makeSettingsRow(
-            title: "Hold-to-talk shortcut",
-            detail: "Choose which key triggers listening when held.",
+            title: "Shortcut",
+            detail: "Choose which key/combo triggers listening.",
             control: shortcutPopup
         )
 
@@ -113,7 +131,7 @@ class PreferencesWindowController: NSWindowController {
 
         let microphoneChimeRow = makeSettingsRow(
             title: "Chimes",
-            detail: "Play microphone chimes on hold-to-talk press and release.",
+            detail: "Play microphone chimes when listening starts and stops.",
             control: microphoneChimeSwitch
         )
 
@@ -127,6 +145,7 @@ class PreferencesWindowController: NSWindowController {
         )
 
         let rowsStack = NSStackView(views: [
+            interactionModeRow,
             shortcutRow,
             clipboardRecoveryRow,
             mediaPauseRow,
@@ -167,7 +186,7 @@ class PreferencesWindowController: NSWindowController {
             rowsStack.bottomAnchor.constraint(equalTo: settingsCard.bottomAnchor),
 
             doneButton.topAnchor.constraint(equalTo: settingsCard.bottomAnchor, constant: 12),
-            doneButton.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -16),
+            doneButton.trailingAnchor.constraint(equalTo: rowsStack.trailingAnchor),
             doneButton.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -16)
         ])
 
@@ -256,6 +275,30 @@ class PreferencesWindowController: NSWindowController {
         return row
     }
 
+    private func makeInteractionModeControl() -> NSView {
+        configureRadioButton(holdToTalkRadioButton, mode: .holdToTalk, tag: 0)
+        configureRadioButton(listenToggleRadioButton, mode: .listenToggle, tag: 1)
+
+        let stack = NSStackView(views: [holdToTalkRadioButton, listenToggleRadioButton])
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.setContentHuggingPriority(.required, for: .horizontal)
+        stack.setContentCompressionResistancePriority(.required, for: .horizontal)
+        return stack
+    }
+
+    private func configureRadioButton(_ button: NSButton, mode: ListeningInteractionMode, tag: Int) {
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.setButtonType(.radio)
+        button.font = NSFont.systemFont(ofSize: 13)
+        button.target = self
+        button.action = #selector(interactionModeChanged(_:))
+        button.identifier = NSUserInterfaceItemIdentifier(mode.rawValue)
+        button.tag = tag
+    }
+
     private func configureToggle(_ toggle: NSSwitch, action: Selector) {
         toggle.translatesAutoresizingMaskIntoConstraints = false
         toggle.controlSize = .small
@@ -299,6 +342,12 @@ class PreferencesWindowController: NSWindowController {
         shortcutPopup.item(at: index)?.title = shortcut.menuTitle
     }
 
+    private func syncInteractionModeSelection() {
+        let mode = ListeningInteractionMode.load()
+        holdToTalkRadioButton.state = mode == .holdToTalk ? .on : .off
+        listenToggleRadioButton.state = mode == .listenToggle ? .on : .off
+    }
+
     private func syncClipboardRecoveryPreference() {
         clipboardRecoverySwitch.state = ClipboardRecoveryPreference.load() ? .on : .off
     }
@@ -328,6 +377,23 @@ class PreferencesWindowController: NSWindowController {
 
         shortcut.save()
         onShortcutChanged(shortcut)
+    }
+
+    @objc private func interactionModeChanged(_ sender: NSButton) {
+        let mode: ListeningInteractionMode
+        switch sender.tag {
+        case 0:
+            mode = .holdToTalk
+        case 1:
+            mode = .listenToggle
+        default:
+            syncInteractionModeSelection()
+            return
+        }
+
+        mode.save()
+        syncInteractionModeSelection()
+        onInteractionModeChanged(mode)
     }
 
     private func mapStoredShortcutForMenuDisplay(_ shortcut: ListeningShortcut) -> ListeningShortcut {
@@ -531,6 +597,7 @@ class PreferencesWindowController: NSWindowController {
     }
     
     func showWindow() {
+        syncInteractionModeSelection()
         syncShortcutSelection()
         syncClipboardRecoveryPreference()
         syncMediaPausePreference()
