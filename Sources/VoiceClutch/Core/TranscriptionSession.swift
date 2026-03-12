@@ -95,6 +95,16 @@ final class TranscriptionSession {
     }
 
     @discardableResult
+    func playStartChime() -> Bool {
+        audioManager.playStartChime()
+    }
+
+    @discardableResult
+    func playStopChime() -> Bool {
+        audioManager.playStopChime()
+    }
+
+    @discardableResult
     func compactMemoryIfIdle() -> Bool {
         audioManager.compactMemoryIfIdle()
     }

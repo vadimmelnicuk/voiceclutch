@@ -2,7 +2,7 @@ import Foundation
 
 enum ListeningMediaPreference {
     private static let defaultsKey = "pauseMediaWhileListening"
-    private static let defaultValue = true
+    private static let defaultValue = false
 
     static func load() -> Bool {
         guard UserDefaults.standard.object(forKey: defaultsKey) != nil else {

@@ -73,6 +73,16 @@ public final class TranscriptionBootstrapper: ObservableObject {
     }
 
     @discardableResult
+    public func playStartChime() -> Bool {
+        transcriptionSession.playStartChime()
+    }
+
+    @discardableResult
+    public func playStopChime() -> Bool {
+        transcriptionSession.playStopChime()
+    }
+
+    @discardableResult
     public func compactMemoryIfIdle() -> Bool {
         transcriptionSession.compactMemoryIfIdle()
     }

@@ -11,12 +11,10 @@ final class MediaPlaybackController {
     private enum MediaRemoteCommand: Int32 {
         case play = 0
         case pause = 1
-        case togglePlayPause = 2
     }
 
     private enum ResumeAction {
         case playCommand
-        case toggleCommand
     }
 
     private struct Symbols {
@@ -76,17 +74,6 @@ final class MediaPlaybackController {
             return true
         }
 
-        symbols.sendCommand(MediaRemoteCommand.togglePlayPause.rawValue, nil)
-
-        if await waitForPlaybackState(
-            false,
-            using: symbols,
-            timeoutMilliseconds: settleTimeout
-        ) {
-            resumeAction = .toggleCommand
-            return true
-        }
-
         return false
     }
 
@@ -123,8 +110,6 @@ final class MediaPlaybackController {
         switch resumeAction {
         case .playCommand:
             symbols.sendCommand(MediaRemoteCommand.play.rawValue, nil)
-        case .toggleCommand:
-            symbols.sendCommand(MediaRemoteCommand.togglePlayPause.rawValue, nil)
         }
     }
 

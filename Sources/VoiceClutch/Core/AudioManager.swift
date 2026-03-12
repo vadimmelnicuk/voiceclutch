@@ -11,17 +11,28 @@ public class AudioManager: @unchecked Sendable {
     private let maxRecordingDuration: Double = 30.0
     private let fallbackMinimumSpeechDuration: Double = 0.35
     private let fallbackWindowThresholdMultiplier: Float = 0.35
+    private let microphoneChimeResources = MicrophoneChimePlayer.loadResources()
+    private let bluetoothStartChimeDelay: TimeInterval = 0.25
+    private let startChimeRetryWindow: TimeInterval = 1.0
+    private let startChimeRetryDelayAfterConfigurationChange: TimeInterval = 0.25
 
     /// Keep recording briefly after key release so fast utterances do not lose their tail.
     static let postReleaseCaptureDuration: TimeInterval = 0.50
 
     private var audioEngine: AVAudioEngine?
+    private var chimePlayerNode: AVAudioPlayerNode?
+    private var audioEngineConfigurationObserver: NSObjectProtocol?
     private var onTranscription: (@Sendable (String, Bool) -> Void)?
     private var onCaptureReady: (@MainActor @Sendable () -> Void)?
     private let stateLock = NSLock()
     private var isRecording = false
     private var isStreamingSessionReady = false
     private var hasReportedCaptureReady = false
+    private var pendingStartChimeWorkItem: DispatchWorkItem?
+    private var pendingStartChimeRetryWorkItem: DispatchWorkItem?
+    private var lastStartChimeRequestUptime: TimeInterval?
+    private var hasRetriedStartChimeForCurrentSession = false
+    private var hasPlayedStartChimeForCurrentSession = false
 
     /// Serial chain for async ASR operations (ingest/finish/reset).
     private let streamingOperationLock = NSLock()
@@ -108,6 +119,7 @@ public class AudioManager: @unchecked Sendable {
         let engine = AVAudioEngine()
         let inputNode = engine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
+        let chimePlayerNode = attachChimePlayerNode(to: engine)
 
         guard let targetFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -136,6 +148,7 @@ public class AudioManager: @unchecked Sendable {
             isStreamingSessionReady = false
             isFinalizingRecording = false
             hasReportedCaptureReady = false
+            resetStartChimePlaybackStateLocked()
             adaptiveGainMultiplier = 1.0
             onTranscription = callback
             self.onCaptureReady = onCaptureReady
@@ -157,6 +170,8 @@ public class AudioManager: @unchecked Sendable {
         do {
             try engine.start()
             audioEngine = engine
+            self.chimePlayerNode = chimePlayerNode
+            audioEngineConfigurationObserver = installAudioEngineConfigurationObserver(for: engine)
             StreamingMetrics.shared.markAudioEngineStarted()
         } catch {
             withStateLock {
@@ -169,6 +184,8 @@ public class AudioManager: @unchecked Sendable {
                 hasReportedCaptureReady = false
                 adaptiveGainMultiplier = 1.0
             }
+            self.chimePlayerNode = nil
+            audioEngineConfigurationObserver = nil
             inputNode.removeTap(onBus: 0)
             resetStreamingSession()
             throw AudioError.engineStartFailed(error.localizedDescription)
@@ -188,9 +205,65 @@ public class AudioManager: @unchecked Sendable {
                 hasReportedCaptureReady = false
                 adaptiveGainMultiplier = 1.0
             }
+            self.chimePlayerNode = nil
             stopAudioEngine()
             resetStreamingSession()
             throw error
+        }
+    }
+
+    @discardableResult
+    public func playStartChime() -> Bool {
+        let startDelay = currentStartChimeDelay()
+        guard startDelay > 0 else {
+            let didPlay = playChime(.press)
+            withStateLock {
+                recordStartChimePlaybackLocked(didPlay)
+            }
+            return didPlay
+        }
+
+        return scheduleStartChime(after: startDelay)
+    }
+
+    @discardableResult
+    public func playStopChime() -> Bool {
+        let shouldPlayStopChime = withStateLock { () -> Bool in
+            let didPlayStartChime = hasPlayedStartChimeForCurrentSession
+            resetStartChimePlaybackStateLocked()
+            return didPlayStartChime
+        }
+
+        guard shouldPlayStopChime else {
+            return false
+        }
+
+        return playChime(.release)
+    }
+
+    private func playScheduledStartChimeIfNeeded() {
+        let shouldPlay = withStateLock { () -> Bool in
+            guard isRecording, !isFinalizingRecording else {
+                pendingStartChimeWorkItem = nil
+                return false
+            }
+
+            guard pendingStartChimeWorkItem != nil, !hasPlayedStartChimeForCurrentSession else {
+                pendingStartChimeWorkItem = nil
+                return false
+            }
+
+            pendingStartChimeWorkItem = nil
+            return true
+        }
+
+        guard shouldPlay else {
+            return
+        }
+
+        let didPlay = playChime(.press)
+        withStateLock {
+            recordStartChimePlaybackLocked(didPlay)
         }
     }
 
@@ -835,9 +908,266 @@ public class AudioManager: @unchecked Sendable {
         #endif
     }
 
+    private func attachChimePlayerNode(to engine: AVAudioEngine) -> AVAudioPlayerNode? {
+        guard let microphoneChimeResources else {
+            return nil
+        }
+
+        let playerNode = AVAudioPlayerNode()
+        engine.attach(playerNode)
+        engine.connect(playerNode, to: engine.mainMixerNode, format: microphoneChimeResources.format)
+        return playerNode
+    }
+
+    private func playChime(_ sound: MicrophoneChimePlayer.Sound) -> Bool {
+        let playback = withStateLock {
+            () -> (playerNode: AVAudioPlayerNode, buffer: AVAudioPCMBuffer)? in
+            guard let audioEngine, audioEngine.isRunning else {
+                return nil
+            }
+
+            guard let chimePlayerNode, let microphoneChimeResources else {
+                return nil
+            }
+
+            guard isRecording || isFinalizingRecording else {
+                return nil
+            }
+
+            return (chimePlayerNode, microphoneChimeResources.buffer(for: sound))
+        }
+
+        guard let playback else {
+            return false
+        }
+
+        playback.playerNode.stop()
+        playback.playerNode.scheduleBuffer(playback.buffer, completionHandler: nil)
+        playback.playerNode.play()
+        return true
+    }
+
+    private func installAudioEngineConfigurationObserver(for engine: AVAudioEngine) -> NSObjectProtocol {
+        NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: .main
+        ) { [weak self] _ in
+            self?.handleAudioEngineConfigurationChange()
+        }
+    }
+
+    private func handleAudioEngineConfigurationChange() {
+        if reschedulePendingStartChimeAfterConfigurationChange() {
+            return
+        }
+
+        let shouldScheduleRetry = withStateLock { () -> Bool in
+            guard isRecording, !isFinalizingRecording else {
+                return false
+            }
+
+            guard let lastStartChimeRequestUptime else {
+                return false
+            }
+
+            let elapsed = ProcessInfo.processInfo.systemUptime - lastStartChimeRequestUptime
+            guard elapsed <= startChimeRetryWindow, !hasRetriedStartChimeForCurrentSession else {
+                return false
+            }
+
+            pendingStartChimeRetryWorkItem?.cancel()
+            hasRetriedStartChimeForCurrentSession = true
+            return true
+        }
+
+        guard shouldScheduleRetry else {
+            return
+        }
+
+        let retryWorkItem = DispatchWorkItem { [weak self] in
+            self?.playRetriedStartChimeIfNeeded()
+        }
+
+        withStateLock {
+            pendingStartChimeRetryWorkItem = retryWorkItem
+        }
+
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + startChimeRetryDelayAfterConfigurationChange,
+            execute: retryWorkItem
+        )
+    }
+
+    private func scheduleStartChime(after delay: TimeInterval) -> Bool {
+        let workItem = DispatchWorkItem { [weak self] in
+            self?.playScheduledStartChimeIfNeeded()
+        }
+
+        let didSchedule = withStateLock { () -> Bool in
+            guard isRecording, !isFinalizingRecording else {
+                return false
+            }
+
+            prepareScheduledStartChimeLocked(workItem)
+            return true
+        }
+
+        guard didSchedule else {
+            return false
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        return true
+    }
+
+    private func reschedulePendingStartChimeAfterConfigurationChange() -> Bool {
+        let shouldReschedule = withStateLock { () -> Bool in
+            guard isRecording, !isFinalizingRecording else {
+                return false
+            }
+
+            guard pendingStartChimeWorkItem != nil, !hasPlayedStartChimeForCurrentSession else {
+                return false
+            }
+
+            return true
+        }
+
+        guard shouldReschedule else {
+            return false
+        }
+
+        return scheduleStartChime(after: startChimeRetryDelayAfterConfigurationChange)
+    }
+
+    private func playRetriedStartChimeIfNeeded() {
+        let shouldRetry = withStateLock { () -> Bool in
+            pendingStartChimeRetryWorkItem = nil
+
+            guard isRecording, !isFinalizingRecording else {
+                return false
+            }
+
+            guard let lastStartChimeRequestUptime else {
+                return false
+            }
+
+            let elapsed = ProcessInfo.processInfo.systemUptime - lastStartChimeRequestUptime
+            guard elapsed <= (startChimeRetryWindow + startChimeRetryDelayAfterConfigurationChange) else {
+                self.lastStartChimeRequestUptime = nil
+                return false
+            }
+
+            self.lastStartChimeRequestUptime = nil
+            return true
+        }
+
+        guard shouldRetry else {
+            return
+        }
+
+        _ = playChime(.press)
+    }
+
+    private func currentStartChimeDelay() -> TimeInterval {
+        currentInputUsesBluetoothTransport() ? bluetoothStartChimeDelay : 0
+    }
+
+    private func currentInputUsesBluetoothTransport() -> Bool {
+        guard let transportType = currentDefaultInputTransportType() else {
+            return false
+        }
+
+        return transportType == kAudioDeviceTransportTypeBluetooth ||
+            transportType == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    private func currentDefaultInputTransportType() -> UInt32? {
+        var deviceID = AudioDeviceID(0)
+        var propertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var propertySize = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let deviceStatus = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &propertyAddress,
+            0,
+            nil,
+            &propertySize,
+            &deviceID
+        )
+
+        guard deviceStatus == noErr, deviceID != kAudioObjectUnknown else {
+            return nil
+        }
+
+        var transportType: UInt32 = 0
+        propertyAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        propertySize = UInt32(MemoryLayout<UInt32>.size)
+        let transportStatus = AudioObjectGetPropertyData(
+            deviceID,
+            &propertyAddress,
+            0,
+            nil,
+            &propertySize,
+            &transportType
+        )
+
+        guard transportStatus == noErr else {
+            return nil
+        }
+
+        return transportType
+    }
+
+    private func prepareScheduledStartChimeLocked(_ workItem: DispatchWorkItem) {
+        cancelPendingStartChimeWorkItemsLocked()
+        pendingStartChimeWorkItem = workItem
+        lastStartChimeRequestUptime = nil
+        hasRetriedStartChimeForCurrentSession = false
+        hasPlayedStartChimeForCurrentSession = false
+    }
+
+    private func recordStartChimePlaybackLocked(_ didPlay: Bool) {
+        cancelPendingStartChimeWorkItemsLocked()
+        lastStartChimeRequestUptime = didPlay ? ProcessInfo.processInfo.systemUptime : nil
+        hasRetriedStartChimeForCurrentSession = false
+        hasPlayedStartChimeForCurrentSession = didPlay
+    }
+
+    private func resetStartChimePlaybackStateLocked() {
+        cancelPendingStartChimeWorkItemsLocked()
+        lastStartChimeRequestUptime = nil
+        hasRetriedStartChimeForCurrentSession = false
+        hasPlayedStartChimeForCurrentSession = false
+    }
+
+    private func cancelPendingStartChimeWorkItemsLocked() {
+        pendingStartChimeWorkItem?.cancel()
+        pendingStartChimeWorkItem = nil
+        pendingStartChimeRetryWorkItem?.cancel()
+        pendingStartChimeRetryWorkItem = nil
+    }
+
     private func stopAudioEngine() {
+        withStateLock {
+            resetStartChimePlaybackStateLocked()
+        }
+        if let audioEngineConfigurationObserver {
+            NotificationCenter.default.removeObserver(audioEngineConfigurationObserver)
+            self.audioEngineConfigurationObserver = nil
+        }
+        chimePlayerNode?.stop()
         audioEngine?.stop()
         audioEngine?.inputNode.removeTap(onBus: 0)
+        chimePlayerNode = nil
         audioEngine = nil
     }
 

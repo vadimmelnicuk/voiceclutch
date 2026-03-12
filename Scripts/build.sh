@@ -198,6 +198,13 @@ else
     echo "⚠️  Warning: App icon source file not found (Resources/VoiceClutch.png)"
 fi
 
+# Copy chime assets used by MicrophoneChimePlayer.
+if [ -d "Resources/Chimes" ]; then
+    cp -R "Resources/Chimes" "${APP_BUNDLE}/Contents/Resources/"
+else
+    echo "⚠️  Warning: Chime assets folder not found (Resources/Chimes)"
+fi
+
 echo "✅ Build successful!"
 echo ""
 echo "App bundle location: ${APP_BUNDLE}"

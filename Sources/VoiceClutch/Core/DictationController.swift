@@ -103,6 +103,16 @@ public final class DictationController: ObservableObject {
         }
     }
 
+    @discardableResult
+    public func playStartChime() -> Bool {
+        bootstrapper.playStartChime()
+    }
+
+    @discardableResult
+    public func playStopChime() -> Bool {
+        bootstrapper.playStopChime()
+    }
+
     public func shutdown() {
         processingTimeoutTask?.cancel()
         processingTimeoutTask = nil

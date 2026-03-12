@@ -505,13 +505,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        MicrophoneChimePlayer.playPressChime()
-        shouldPlayStopChimeForCurrentSession = true
+        shouldPlayStopChimeForCurrentSession = dictationController.playStartChime()
     }
 
     private func playStopChimeIfNeeded() {
         guard shouldPlayStopChimeForCurrentSession else { return }
-        MicrophoneChimePlayer.playReleaseChime()
+        _ = dictationController.playStopChime()
         shouldPlayStopChimeForCurrentSession = false
     }
 
