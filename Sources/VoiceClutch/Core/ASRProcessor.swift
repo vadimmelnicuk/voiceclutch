@@ -17,7 +17,6 @@ public enum ASRError: Error, LocalizedError {
     }
 }
 
-/// ASR Processor - handles speech recognition using FluidAudio Nemotron streaming manager.
 public actor ASRProcessor {
     private static let streamSampleRate: Double = 16_000
     private static let streamChannels: AVAudioChannelCount = 1
