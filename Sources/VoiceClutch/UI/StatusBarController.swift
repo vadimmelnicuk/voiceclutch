@@ -16,6 +16,10 @@ class StatusBarController: NSObject {
     private var previousState: VoiceClutchState?
     private var notificationPopover: NSPopover?
     private var notificationDismissWorkItem: DispatchWorkItem?
+    private var currentMenuState: VoiceClutchState = .idle
+    private var hasMissingPermissions = false
+    private var previousHasMissingPermissions = false
+    private var currentDownloadProgress: Double?
 
     init(
         onShortcutChanged: @escaping @MainActor (ListeningShortcut) -> Void,
@@ -36,6 +40,10 @@ class StatusBarController: NSObject {
         activeListeningToolbarIcon = toolbarIcon.flatMap {
             Self.maskedToolbarIcon(from: $0, color: NSColor(srgbRed: 1.0, green: 0.6, blue: 0.0, alpha: 1.0))
         }
+        hasMissingPermissions =
+            !permissionsCoordinator.accessibilityGranted ||
+            permissionsCoordinator.microphoneStatus != .authorized
+        previousHasMissingPermissions = hasMissingPermissions
 
         super.init()
 
@@ -47,13 +55,16 @@ class StatusBarController: NSObject {
         menu.autoenablesItems = false
 
         // Status item (non-interactive, shows current state)
+        let initialTitle = hasMissingPermissions ? "Permissions missing" : "Ready"
+        let initialColor: NSColor = hasMissingPermissions ? .systemOrange : .systemGreen
+
         let statusMenuItem = NSMenuItem(
-            title: "Ready",
+            title: initialTitle,
             action: nil,
             keyEquivalent: ""
         )
         statusMenuItem.isEnabled = false
-        statusMenuItem.view = makeStatusMenuItemView(title: "Ready", color: .systemGreen)
+        statusMenuItem.view = makeStatusMenuItemView(title: initialTitle, color: initialColor)
         self.statusMenuItem = statusMenuItem
         menu.addItem(statusMenuItem)
 
@@ -121,32 +132,62 @@ class StatusBarController: NSObject {
     }
 
     func updateMenu(for state: VoiceClutchState) {
+        currentMenuState = state
         let title: String
         let color: NSColor
-        switch state {
-        case .idle:
-            title = "Ready"
-            color = .systemGreen
-        case .recording:
-            title = "Recording"
-            color = NSColor(srgbRed: 1.0, green: 0.6, blue: 0.0, alpha: 1.0)
-        case .processing:
-            title = "Processing"
-            color = .systemBlue
-        case .downloading:
-            title = "Downloading model"
-            color = .systemGray
-        case .loadingModel:
-            title = "Loading model"
-            color = .systemGray
+        if hasMissingPermissions {
+            title = "Permissions missing"
+            color = .systemOrange
+        } else {
+            switch state {
+            case .idle:
+                title = "Ready"
+                color = .systemGreen
+            case .recording:
+                title = "Recording"
+                color = NSColor(srgbRed: 1.0, green: 0.6, blue: 0.0, alpha: 1.0)
+            case .processing:
+                title = "Processing"
+                color = .systemBlue
+            case .downloading:
+                if let currentDownloadProgress {
+                    let percent = Int((currentDownloadProgress * 100).rounded())
+                    let clampedPercent = max(0, min(100, percent))
+                    title = "Downloading model \(clampedPercent)%"
+                } else {
+                    title = "Downloading model"
+                }
+                color = .systemGray
+            case .loadingModel:
+                title = "Loading model"
+                color = .systemGray
+            }
         }
 
         setStatusMenuLabel(title: title, color: color)
     }
 
+    func updatePermissionStatus(accessibilityGranted: Bool, microphoneGranted: Bool) {
+        let missingPermissions = !accessibilityGranted || !microphoneGranted
+        guard missingPermissions != hasMissingPermissions else {
+            return
+        }
+
+        hasMissingPermissions = missingPermissions
+        updateMenu(for: currentMenuState)
+        updateIcon(for: currentMenuState)
+    }
+
     func updateDownloadProgress(_ progress: Double) {
-        let progressPercent = Int(progress * 100)
-        setStatusMenuLabel(title: "Downloading model \(progressPercent)%", color: .systemGray)
+        currentDownloadProgress = progress
+
+        guard currentMenuState == .downloading, !hasMissingPermissions else {
+            return
+        }
+
+        let progressPercent = Int((progress * 100).rounded())
+        let clampedPercent = max(0, min(100, progressPercent))
+        setStatusMenuLabel(title: "Downloading model \(clampedPercent)%", color: .systemGray)
     }
 
     func showToolbarNotification(_ message: String, duration: TimeInterval = 3.0) {
@@ -375,9 +416,9 @@ class StatusBarController: NSObject {
     }
 
     private func applyToolbarOpacity(for state: VoiceClutchState, on button: NSStatusBarButton) {
-        let isDimmedState = state == .downloading || state == .loadingModel
+        let isDimmedState = state == .downloading || state == .loadingModel || hasMissingPermissions
         let targetOpacity: CGFloat = isDimmedState ? 0.5 : 1.0
-        let wasDimmedState = previousState == .downloading || previousState == .loadingModel
+        let wasDimmedState = previousState == .downloading || previousState == .loadingModel || previousHasMissingPermissions
         let isExitingDimmedState = wasDimmedState && !isDimmedState
 
         if isExitingDimmedState {
@@ -389,6 +430,8 @@ class StatusBarController: NSObject {
         } else {
             button.alphaValue = targetOpacity
         }
+
+        previousHasMissingPermissions = hasMissingPermissions
     }
 
     private func fallbackEmoji(for state: VoiceClutchState) -> String {

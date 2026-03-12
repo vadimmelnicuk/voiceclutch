@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import CoreGraphics
 import Dispatch
 
 // Import core components
@@ -22,6 +23,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var currentListeningShortcutConfig: HotkeyConfig = ListeningShortcut.load().hotkeyConfig
     private var lastPermissionSnapshot: PermissionSnapshot?
     private var hotkeyRecoveryTimer: Timer?
+    private var missingPermissionShortcutFeedbackTimer: Timer?
+    private var isMissingPermissionShortcutCurrentlyPressed = false
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var isListeningHotkeyHeld = false
     private var shouldPlayStopChimeForCurrentSession = false
@@ -39,6 +42,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         static let hotkeyNeedsAccessibility = "Enable Accessibility permission to activate the listening shortcut."
         static let hotkeyRequiresAccessibility = "Accessibility permission is required for global hotkeys."
         static let hotkeyInvalidShortcut = "Could not register listening shortcut. Choose another key combination."
+        static let permissionsMissing = "Permissions missing. Open Preferences > Permissions."
         static let micPermissionPending = "Microphone permission is pending. Open Preferences > Permissions."
         static let micPermissionDenied = "Microphone permission is denied. Open Preferences > Permissions."
         static let micPermissionUnknown = "Microphone permission status is unknown."
@@ -141,6 +145,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hotkeyManager.unregister()
         hotkeyRecoveryTimer?.invalidate()
         hotkeyRecoveryTimer = nil
+        missingPermissionShortcutFeedbackTimer?.invalidate()
+        missingPermissionShortcutFeedbackTimer = nil
         permissionsCoordinator.stopMonitoring()
         memoryPressureSource?.cancel()
         memoryPressureSource = nil
@@ -318,6 +324,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func handlePermissionSnapshotUpdate(_ snapshot: PermissionSnapshot) {
         let previousSnapshot = lastPermissionSnapshot
         lastPermissionSnapshot = snapshot
+        statusBarController?.updatePermissionStatus(
+            accessibilityGranted: snapshot.accessibilityGranted,
+            microphoneGranted: snapshot.microphoneStatus == .authorized
+        )
+        updateMissingPermissionShortcutFeedbackMonitoring(using: snapshot)
 
         if snapshot.accessibilityGranted && !hasCompletedInitialPreparation {
             ensureModelsPrepared()
@@ -397,11 +408,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Recording Actions
     private func handleHotkeyPressed() {
         switch currentState {
-        case .downloading, .loadingModel:
-            showNotReadyNotification()
-            return
-        case .idle:
-            break
         case .recording:
             guard currentInteractionMode == .listenToggle else { return }
             playStopChimeIfNeeded()
@@ -409,6 +415,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             resumeMediaIfNeeded()
             return
         case .processing:
+            return
+        case .idle, .downloading, .loadingModel:
+            break
+        }
+
+        guard !notifyMissingPermissionsOnHotkeyPressIfNeeded() else {
+            return
+        }
+
+        switch currentState {
+        case .downloading, .loadingModel:
+            showNotReadyNotification()
+            return
+        case .idle:
+            break
+        case .recording, .processing:
             return
         }
 
@@ -562,6 +584,67 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         statusBarController?.showToolbarNotification(message)
+    }
+
+    private func updateMissingPermissionShortcutFeedbackMonitoring(using snapshot: PermissionSnapshot) {
+        let microphoneGranted = snapshot.microphoneStatus == .authorized
+        let hasMissingPermissions = !snapshot.accessibilityGranted || !microphoneGranted
+        guard hasMissingPermissions else {
+            missingPermissionShortcutFeedbackTimer?.invalidate()
+            missingPermissionShortcutFeedbackTimer = nil
+            isMissingPermissionShortcutCurrentlyPressed = false
+            return
+        }
+
+        guard missingPermissionShortcutFeedbackTimer == nil else {
+            return
+        }
+
+        missingPermissionShortcutFeedbackTimer = Timer.scheduledTimer(
+            withTimeInterval: 0.1,
+            repeats: true
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.pollMissingPermissionShortcutState()
+            }
+        }
+    }
+
+    private func pollMissingPermissionShortcutState() {
+        let requiredKeyCodes = currentListeningShortcutConfig.requiredKeyCodes
+        guard !requiredKeyCodes.isEmpty else {
+            isMissingPermissionShortcutCurrentlyPressed = false
+            return
+        }
+
+        let allKeysPressed = requiredKeyCodes.allSatisfy { keyCode in
+            CGEventSource.keyState(.combinedSessionState, key: CGKeyCode(keyCode))
+        }
+
+        if allKeysPressed && !isMissingPermissionShortcutCurrentlyPressed {
+            _ = notifyMissingPermissionsOnHotkeyPressIfNeeded()
+        }
+
+        isMissingPermissionShortcutCurrentlyPressed = allKeysPressed
+    }
+
+    private func notifyMissingPermissionsOnHotkeyPressIfNeeded() -> Bool {
+        let accessibilityGranted = permissionsCoordinator.accessibilityGranted
+        let microphoneStatus = permissionsCoordinator.microphoneStatus
+        let microphoneGranted = microphoneStatus == .authorized
+        guard !accessibilityGranted || !microphoneGranted else {
+            return false
+        }
+
+        statusBarController?.showToolbarNotification(NotificationMessage.permissionsMissing)
+
+        if microphoneStatus == .notDetermined {
+            Task { [weak self] in
+                _ = await self?.permissionsCoordinator.requestMicrophoneAccessIfNeeded()
+            }
+        }
+
+        return true
     }
 
     func stopRecording() {

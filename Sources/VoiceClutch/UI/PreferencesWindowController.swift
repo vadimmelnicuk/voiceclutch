@@ -8,7 +8,7 @@ class PreferencesWindowController: NSWindowController {
         static let contentWidth: CGFloat = 520
         static let contentHeight: CGFloat = 588
         static let rowHeight: CGFloat = 52
-        static let interactionRowHeight: CGFloat = 58
+        static let interactionRowHeight: CGFloat = 68
     }
 
     private enum CustomShortcutCapture {
@@ -25,10 +25,10 @@ class PreferencesWindowController: NSWindowController {
     private let clipboardRecoverySwitch = NSSwitch(frame: .zero)
     private let mediaPauseSwitch = NSSwitch(frame: .zero)
     private let microphoneChimeSwitch = NSSwitch(frame: .zero)
-    private let accessibilityPermissionLabel = NSTextField(labelWithString: "")
+    private let accessibilityPermissionIndicator = NSView()
     private let accessibilityPermissionButton = NSButton(title: "Grant", target: nil, action: nil)
-    private let microphonePermissionLabel = NSTextField(labelWithString: "")
-    private let microphonePermissionButton = NSButton(title: "Allow", target: nil, action: nil)
+    private let microphonePermissionIndicator = NSView()
+    private let microphonePermissionButton = NSButton(title: "Grant", target: nil, action: nil)
     private var cancellables = Set<AnyCancellable>()
     private var customShortcutCaptureMonitor: Any?
     private var capturedShortcutCodes = Set<UInt32>()
@@ -145,7 +145,7 @@ class PreferencesWindowController: NSWindowController {
             showsSeparator: false
         )
 
-        configurePermissionStatusLabel(accessibilityPermissionLabel)
+        configurePermissionStatusIndicator(accessibilityPermissionIndicator)
         configurePermissionActionButton(
             accessibilityPermissionButton,
             action: #selector(accessibilityPermissionButtonPressed)
@@ -154,12 +154,12 @@ class PreferencesWindowController: NSWindowController {
             title: "Accessibility",
             detail: "Required for global shortcut capture.",
             control: makePermissionControl(
-                statusLabel: accessibilityPermissionLabel,
+                statusIndicator: accessibilityPermissionIndicator,
                 button: accessibilityPermissionButton
             )
         )
 
-        configurePermissionStatusLabel(microphonePermissionLabel)
+        configurePermissionStatusIndicator(microphonePermissionIndicator)
         configurePermissionActionButton(
             microphonePermissionButton,
             action: #selector(microphonePermissionButtonPressed)
@@ -168,7 +168,7 @@ class PreferencesWindowController: NSWindowController {
             title: "Microphone",
             detail: "Required for dictation audio capture.",
             control: makePermissionControl(
-                statusLabel: microphonePermissionLabel,
+                statusIndicator: microphonePermissionIndicator,
                 button: microphonePermissionButton
             ),
             showsSeparator: false
@@ -421,14 +421,13 @@ class PreferencesWindowController: NSWindowController {
         toggle.heightAnchor.constraint(equalToConstant: toggleSize.height).isActive = true
     }
 
-    private func configurePermissionStatusLabel(_ label: NSTextField) {
-        label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = .secondaryLabelColor
-        label.alignment = .right
-        label.lineBreakMode = .byTruncatingTail
-        label.maximumNumberOfLines = 1
-        label.widthAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
+    private func configurePermissionStatusIndicator(_ indicator: NSView) {
+        indicator.translatesAutoresizingMaskIntoConstraints = false
+        indicator.wantsLayer = true
+        indicator.layer?.cornerRadius = 4
+        indicator.layer?.backgroundColor = NSColor.systemOrange.cgColor
+        indicator.widthAnchor.constraint(equalToConstant: 8).isActive = true
+        indicator.heightAnchor.constraint(equalToConstant: 8).isActive = true
     }
 
     private func configurePermissionActionButton(_ button: NSButton, action: Selector) {
@@ -438,19 +437,24 @@ class PreferencesWindowController: NSWindowController {
         button.action = action
     }
 
-    private func makePermissionControl(statusLabel: NSTextField, button: NSButton) -> NSView {
-        let stack = NSStackView(views: [statusLabel, button])
+    private func makePermissionControl(statusIndicator: NSView, button: NSButton) -> NSView {
+        let stack = NSStackView(views: [statusIndicator, button])
         stack.translatesAutoresizingMaskIntoConstraints = false
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = 8
+        stack.spacing = 10
         stack.setContentHuggingPriority(.required, for: .horizontal)
         stack.setContentCompressionResistancePriority(.required, for: .horizontal)
         return stack
     }
 
     private func preferencesBackgroundColor() -> NSColor {
-        NSColor.controlBackgroundColor.withAlphaComponent(0.55)
+        let appearance = window?.effectiveAppearance ?? NSApp.effectiveAppearance
+        let isDarkMode = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        if isDarkMode {
+            return NSColor.windowBackgroundColor.withAlphaComponent(0.82)
+        }
+        return NSColor.windowBackgroundColor.withAlphaComponent(0.9)
     }
 
     private func settingsCardBackgroundColor() -> NSColor {
@@ -532,39 +536,20 @@ class PreferencesWindowController: NSWindowController {
     }
 
     private func applyPermissionSnapshot(_ snapshot: PermissionSnapshot) {
-        let accessibilityStatus = snapshot.accessibilityGranted
-            ? "Granted"
-            : "Not granted"
-        accessibilityPermissionLabel.stringValue = accessibilityStatus
-        accessibilityPermissionLabel.textColor = snapshot.accessibilityGranted
-            ? .systemGreen
-            : .systemOrange
+        accessibilityPermissionIndicator.layer?.backgroundColor = snapshot.accessibilityGranted
+            ? NSColor.systemGreen.cgColor
+            : NSColor.systemOrange.cgColor
         accessibilityPermissionButton.title = snapshot.accessibilityGranted
-            ? "Open Settings"
+            ? "Revoke"
             : "Grant"
 
-        switch snapshot.microphoneStatus {
-        case .authorized:
-            microphonePermissionLabel.stringValue = "Granted"
-            microphonePermissionLabel.textColor = .systemGreen
-            microphonePermissionButton.title = "Open Settings"
-        case .notDetermined:
-            microphonePermissionLabel.stringValue = "Not determined"
-            microphonePermissionLabel.textColor = .systemOrange
-            microphonePermissionButton.title = "Allow"
-        case .denied:
-            microphonePermissionLabel.stringValue = "Denied"
-            microphonePermissionLabel.textColor = .systemRed
-            microphonePermissionButton.title = "Open Settings"
-        case .restricted:
-            microphonePermissionLabel.stringValue = "Restricted"
-            microphonePermissionLabel.textColor = .systemRed
-            microphonePermissionButton.title = "Open Settings"
-        @unknown default:
-            microphonePermissionLabel.stringValue = "Unknown"
-            microphonePermissionLabel.textColor = .secondaryLabelColor
-            microphonePermissionButton.title = "Open Settings"
-        }
+        let microphoneGranted = snapshot.microphoneStatus == .authorized
+        microphonePermissionIndicator.layer?.backgroundColor = microphoneGranted
+            ? NSColor.systemGreen.cgColor
+            : NSColor.systemOrange.cgColor
+        microphonePermissionButton.title = microphoneGranted
+            ? "Revoke"
+            : "Grant"
     }
 
     @objc private func shortcutChanged(_ sender: NSPopUpButton) {
