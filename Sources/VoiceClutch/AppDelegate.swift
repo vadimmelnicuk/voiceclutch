@@ -441,7 +441,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         StreamingMetrics.shared.markTriggerPressed()
         isListeningHotkeyHeld = true
-        playStartChimeIfEnabled()
+        shouldPlayStopChimeForCurrentSession = false
 
         let requiresHeldHotkey = currentInteractionMode == .holdToTalk
         Task { [weak self] in
@@ -555,7 +555,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Start audio recording
         do {
-            try dictationController.startRecording()
+            try dictationController.startRecording(onCaptureReady: { [weak self] in
+                self?.handleCaptureReadyForCurrentSession()
+            })
             return true
         } catch {
             if let audioError = error as? AudioError, case .permissionDenied = audioError {
@@ -566,6 +568,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             print("❌ Failed to start recording: \(error)")
             return false
         }
+    }
+
+    private func handleCaptureReadyForCurrentSession() {
+        guard dictationController.state == .recording else { return }
+        if currentInteractionMode == .holdToTalk && !isListeningHotkeyHeld {
+            return
+        }
+
+        playStartChimeIfEnabled()
     }
 
     private func resumeMediaIfNeeded() {

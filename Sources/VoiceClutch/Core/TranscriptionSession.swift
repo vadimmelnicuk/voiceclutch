@@ -73,18 +73,21 @@ final class TranscriptionSession {
     }
 
     /// Start a recording and forward partial/final transcription results.
-    func startRecording() throws {
+    func startRecording(onCaptureReady: (@MainActor @Sendable () -> Void)? = nil) throws {
         guard isReady else {
             throw SessionError.notReady
         }
 
-        try audioManager.startRecording { [weak self] text, isFinal in
-            guard let self else { return }
+        try audioManager.startRecording(
+            callback: { [weak self] text, isFinal in
+                guard let self else { return }
 
-            Task { @MainActor in
-                self.onTranscriptionResult?(text, isFinal)
-            }
-        }
+                Task { @MainActor in
+                    self.onTranscriptionResult?(text, isFinal)
+                }
+            },
+            onCaptureReady: onCaptureReady
+        )
     }
 
     func stopRecording() {

@@ -58,7 +58,7 @@ public final class DictationController: ObservableObject {
         return outcome
     }
 
-    public func startRecording() throws {
+    public func startRecording(onCaptureReady: (@MainActor @Sendable () -> Void)? = nil) throws {
         guard state == .idle else { return }
         processingTimeoutTask?.cancel()
         processingTimeoutTask = nil
@@ -72,7 +72,7 @@ public final class DictationController: ObservableObject {
         state = .recording
 
         do {
-            try bootstrapper.startRecording()
+            try bootstrapper.startRecording(onCaptureReady: onCaptureReady)
             TextInjector.beginStreamingSession()
         } catch {
             state = .idle

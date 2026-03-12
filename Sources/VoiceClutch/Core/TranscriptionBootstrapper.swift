@@ -64,8 +64,8 @@ public final class TranscriptionBootstrapper: ObservableObject {
         return hadExistingModels ? .usedExistingModels : .downloadedModels
     }
 
-    public func startRecording() throws {
-        try transcriptionSession.startRecording()
+    public func startRecording(onCaptureReady: (@MainActor @Sendable () -> Void)? = nil) throws {
+        try transcriptionSession.startRecording(onCaptureReady: onCaptureReady)
     }
 
     public func stopRecording() {

@@ -9,15 +9,19 @@ private final class AsyncResultBox<T>: @unchecked Sendable {
 /// Manages audio capture via AVAudioEngine and integrates with ASR.
 public class AudioManager: @unchecked Sendable {
     private let maxRecordingDuration: Double = 30.0
+    private let fallbackMinimumSpeechDuration: Double = 0.35
+    private let fallbackWindowThresholdMultiplier: Float = 0.35
 
     /// Keep recording briefly after key release so fast utterances do not lose their tail.
     static let postReleaseCaptureDuration: TimeInterval = 0.50
 
     private var audioEngine: AVAudioEngine?
     private var onTranscription: (@Sendable (String, Bool) -> Void)?
+    private var onCaptureReady: (@MainActor @Sendable () -> Void)?
     private let stateLock = NSLock()
     private var isRecording = false
     private var isStreamingSessionReady = false
+    private var hasReportedCaptureReady = false
 
     /// Serial chain for async ASR operations (ingest/finish/reset).
     private let streamingOperationLock = NSLock()
@@ -35,20 +39,30 @@ public class AudioManager: @unchecked Sendable {
     /// ASR Processor for transcription.
     private var asrProcessor: ASRProcessor?
 
-    /// Microphone gain multiplier (boosts quiet input).
+    /// Base microphone gain multiplier.
     private let microphoneGain: Float = 2.0
+    /// Adaptive gain compensation targets quiet headset mics without over-amplifying noise.
+    private let targetInputRMS: Float = 0.055
+    private let inputNoiseFloorRMS: Float = 0.002
+    private let maximumAdaptiveGainMultiplier: Float = 3.0
+    private let adaptiveGainRiseSmoothing: Float = 0.20
+    private let adaptiveGainFallSmoothing: Float = 0.35
+    private let adaptiveGainSilentDecay: Float = 0.08
+    private var adaptiveGainMultiplier: Float = 1.0
 
     /// Silence detection threshold (RMS energy level 0.0-1.0).
     private var silenceThreshold: Float = 0.01
 
     /// Add trailing context to help short phrases decode cleanly.
     private let trailingContextPaddingDuration: Double = 0.18
+    /// Add leading context to protect first-word decoding on headset startup.
+    private let leadingStreamingContextPaddingDuration: Double = 0.12
 
     /// Minimum duration for reliable final decode.
     private let minimumTranscriptionDuration: Double = 1.0
 
     /// Moderate tap buffers reduce per-chunk ingest overhead while keeping latency low.
-    private let inputTapBufferSize: AVAudioFrameCount = 256
+    private let inputTapBufferSize: AVAudioFrameCount = 128
     /// Minimum sample count before dispatching a streaming ingest operation.
     private let streamingIngestChunkSize = 256
 
@@ -79,7 +93,10 @@ public class AudioManager: @unchecked Sendable {
 
     /// Start recording audio.
     /// - Parameter callback: Function called with transcribed text and isFinal flag.
-    public func startRecording(callback: @escaping @Sendable (String, Bool) -> Void) throws {
+    public func startRecording(
+        callback: @escaping @Sendable (String, Bool) -> Void,
+        onCaptureReady: (@MainActor @Sendable () -> Void)? = nil
+    ) throws {
         let alreadyRecording = withStateLock { isRecording }
         guard !alreadyRecording else {
             throw AudioError.alreadyRecording
@@ -118,7 +135,10 @@ public class AudioManager: @unchecked Sendable {
             isRecording = true
             isStreamingSessionReady = false
             isFinalizingRecording = false
+            hasReportedCaptureReady = false
+            adaptiveGainMultiplier = 1.0
             onTranscription = callback
+            self.onCaptureReady = onCaptureReady
         }
 
         inputNode.installTap(onBus: 0, bufferSize: inputTapBufferSize, format: format) { [weak self] buffer, _ in
@@ -131,6 +151,9 @@ public class AudioManager: @unchecked Sendable {
             )
         }
 
+        // Pre-allocate graph resources to reduce start-time overhead.
+        engine.prepare()
+
         do {
             try engine.start()
             audioEngine = engine
@@ -142,6 +165,9 @@ public class AudioManager: @unchecked Sendable {
                 audioBuffer.removeAll(keepingCapacity: true)
                 pendingStreamingSamples.removeAll(keepingCapacity: true)
                 onTranscription = nil
+                self.onCaptureReady = nil
+                hasReportedCaptureReady = false
+                adaptiveGainMultiplier = 1.0
             }
             inputNode.removeTap(onBus: 0)
             resetStreamingSession()
@@ -158,6 +184,9 @@ public class AudioManager: @unchecked Sendable {
                 audioBuffer.removeAll(keepingCapacity: true)
                 pendingStreamingSamples.removeAll(keepingCapacity: true)
                 onTranscription = nil
+                self.onCaptureReady = nil
+                hasReportedCaptureReady = false
+                adaptiveGainMultiplier = 1.0
             }
             stopAudioEngine()
             resetStreamingSession()
@@ -196,6 +225,9 @@ public class AudioManager: @unchecked Sendable {
             audioBuffer.removeAll(keepingCapacity: true)
             pendingStreamingSamples.removeAll(keepingCapacity: true)
             onTranscription = nil
+            onCaptureReady = nil
+            hasReportedCaptureReady = false
+            adaptiveGainMultiplier = 1.0
             return true
         }
 
@@ -220,6 +252,9 @@ public class AudioManager: @unchecked Sendable {
             isFinalizingRecording = false
             audioBuffer.removeAll(keepingCapacity: true)
             onTranscription = nil
+            onCaptureReady = nil
+            hasReportedCaptureReady = false
+            adaptiveGainMultiplier = 1.0
             return (bufferedAudio, callback)
         }
 
@@ -232,7 +267,15 @@ public class AudioManager: @unchecked Sendable {
         let detection = detectSpeech(finalizationState.bufferedAudio, threshold: silenceThreshold)
         let preparation = prepareTranscription(
             finalizationState.bufferedAudio,
-            detection: detection
+            detection: detection,
+            threshold: silenceThreshold
+        )
+
+        debugLogFinalizationDecisionIfNeeded(
+            detection: detection,
+            preparation: preparation,
+            threshold: silenceThreshold,
+            capturedSampleCount: finalizationState.bufferedAudio.count
         )
 
         // If silence, clear streaming session and emit empty final so injected partials are removed.
@@ -243,13 +286,6 @@ public class AudioManager: @unchecked Sendable {
             finalizationState.callback?("", true)
             return
         }
-
-        #if DEBUG
-        print(
-            "\(debugDescription(for: detection, threshold: silenceThreshold, label: "SPEECH")) " +
-            "| \(String(format: "%.2f", preparation.transcriptionDurationSeconds))s ASR"
-        )
-        #endif
 
         guard let asrProcessor else {
             StreamingMetrics.shared.markFinalDelivered()
@@ -313,6 +349,7 @@ public class AudioManager: @unchecked Sendable {
         }
 
         StreamingMetrics.shared.markFirstTapReceived()
+        reportCaptureReadyIfNeeded()
 
         // Calculate required frame capacity.
         let inputFrameLength = Double(buffer.frameLength)
@@ -344,9 +381,11 @@ public class AudioManager: @unchecked Sendable {
         }
 
         let frameLength = Int(convertedBuffer.frameLength)
+        let inputRMS = calculateInputRMS(samples: data, count: frameLength)
+        let effectiveGain = microphoneGain * adaptiveGainMultiplier(forInputRMS: inputRMS)
         let samples = Array<Float>(unsafeUninitializedCapacity: frameLength) { initializedBuffer, initializedCount in
             for sampleIndex in 0..<frameLength {
-                let amplifiedSample = data[sampleIndex] * microphoneGain
+                let amplifiedSample = data[sampleIndex] * effectiveGain
                 initializedBuffer[sampleIndex] = max(-1.0, min(1.0, amplifiedSample))
             }
             initializedCount = frameLength
@@ -388,6 +427,26 @@ public class AudioManager: @unchecked Sendable {
         }
 
         activateStreamingSession(asrProcessor: asrProcessor)
+    }
+
+    private func reportCaptureReadyIfNeeded() {
+        let readyEvent = withStateLock { () -> (callback: (@MainActor @Sendable () -> Void)?, shouldMark: Bool) in
+            guard isRecording, !hasReportedCaptureReady else {
+                return (nil, false)
+            }
+
+            hasReportedCaptureReady = true
+            return (onCaptureReady, true)
+        }
+
+        guard readyEvent.shouldMark else { return }
+
+        StreamingMetrics.shared.markCaptureReady()
+        guard let callback = readyEvent.callback else { return }
+
+        Task { @MainActor in
+            callback()
+        }
     }
 
     private func enqueueStreamingSamples(_ samples: [Float]) {
@@ -444,6 +503,16 @@ public class AudioManager: @unchecked Sendable {
     }
 
     private func activateStreamingSession(asrProcessor: ASRProcessor) {
+        let leadingContextSampleCount = Int(targetSampleRate * leadingStreamingContextPaddingDuration)
+        if leadingContextSampleCount > 0 {
+            let leadingContextSamples = Array(repeating: Float.zero, count: leadingContextSampleCount)
+            enqueueIngestOperation(
+                samples: leadingContextSamples,
+                asrProcessor: asrProcessor,
+                errorLabel: "ASR startup leading ingest failed"
+            )
+        }
+
         let startupBufferedSamples = consumePendingStreamingSamples()
         if !startupBufferedSamples.isEmpty {
             enqueueIngestOperation(
@@ -552,6 +621,7 @@ public class AudioManager: @unchecked Sendable {
             "⏱️ startup record=\(formatMetricMs(snapshot.triggerToRecordingStartMs)) " +
             "engine=\(formatMetricMs(snapshot.triggerToAudioEngineStartMs)) " +
             "tap=\(formatMetricMs(snapshot.triggerToFirstTapMs)) " +
+            "captureReady=\(formatMetricMs(snapshot.triggerToCaptureReadyMs)) " +
             "stream=\(formatMetricMs(snapshot.triggerToASRStreamReadyMs)) " +
             "partial=\(formatMetricMs(snapshot.triggerToFirstPartialMs)) " +
             "flush=\(snapshot.bufferedSamplesFlushedOnStreamReady) samples " +
@@ -593,6 +663,7 @@ public class AudioManager: @unchecked Sendable {
             audioBuffer.removeAll(keepingCapacity: false)
             isStreamingSessionReady = false
             pendingStreamingSamples.removeAll(keepingCapacity: false)
+            adaptiveGainMultiplier = 1.0
             return true
         }
 
@@ -619,17 +690,28 @@ public class AudioManager: @unchecked Sendable {
         let shouldTranscribe: Bool
         let additionalSampleCount: Int
         let transcriptionDurationSeconds: Double
+        let decisionLabel: String
+        let usedFallback: Bool
     }
 
     private func prepareTranscription(
         _ buffer: [Float],
-        detection: SpeechDetectionResult
+        detection: SpeechDetectionResult,
+        threshold: Float
     ) -> TranscriptionPreparation {
-        guard detection.containsSpeech else {
+        let usedFallback = shouldUseFallbackTranscription(
+            detection: detection,
+            threshold: threshold,
+            sampleCount: buffer.count
+        )
+
+        guard detection.containsSpeech || usedFallback else {
             return TranscriptionPreparation(
                 shouldTranscribe: false,
                 additionalSampleCount: 0,
-                transcriptionDurationSeconds: 0
+                transcriptionDurationSeconds: 0,
+                decisionLabel: "silence_gate",
+                usedFallback: false
             )
         }
 
@@ -645,8 +727,28 @@ public class AudioManager: @unchecked Sendable {
         return TranscriptionPreparation(
             shouldTranscribe: true,
             additionalSampleCount: max(0, totalSampleCount - baseSampleCount),
-            transcriptionDurationSeconds: Double(totalSampleCount) / targetSampleRate
+            transcriptionDurationSeconds: Double(totalSampleCount) / targetSampleRate,
+            decisionLabel: usedFallback ? "fallback_cautious" : "window_rms",
+            usedFallback: usedFallback
         )
+    }
+
+    private func shouldUseFallbackTranscription(
+        detection: SpeechDetectionResult,
+        threshold: Float,
+        sampleCount: Int
+    ) -> Bool {
+        guard !detection.containsSpeech else {
+            return false
+        }
+
+        let captureDuration = Double(sampleCount) / targetSampleRate
+        guard captureDuration >= fallbackMinimumSpeechDuration else {
+            return false
+        }
+
+        let fallbackWindowThreshold = threshold * fallbackWindowThresholdMultiplier
+        return detection.maxWindowRms >= fallbackWindowThreshold
     }
 
     private func detectSpeech(_ buffer: [Float], threshold: Float) -> SpeechDetectionResult {
@@ -674,6 +776,63 @@ public class AudioManager: @unchecked Sendable {
             "peak=\(String(format: "%.4f", detection.peakAmplitude)) " +
             "maxWindowRMS=\(String(format: "%.4f", detection.maxWindowRms))/\(String(format: "%.4f", windowThreshold)) " +
             "windowRun=\(detection.longestWindowRun)/\(requiredConsecutiveSpeechWindows)"
+    }
+
+    private func calculateInputRMS(samples: UnsafePointer<Float>, count: Int) -> Float {
+        guard count > 0 else { return 0 }
+
+        var sumOfSquares = Double.zero
+        for index in 0..<count {
+            let sample = Double(samples[index])
+            sumOfSquares += sample * sample
+        }
+
+        return Float(sqrt(sumOfSquares / Double(count)))
+    }
+
+    private func adaptiveGainMultiplier(forInputRMS inputRMS: Float) -> Float {
+        withStateLock {
+            guard inputRMS > inputNoiseFloorRMS else {
+                adaptiveGainMultiplier = max(1.0, adaptiveGainMultiplier - adaptiveGainSilentDecay)
+                return adaptiveGainMultiplier
+            }
+
+            let desiredMultiplier = min(
+                maximumAdaptiveGainMultiplier,
+                max(1.0, targetInputRMS / inputRMS)
+            )
+
+            let smoothing = desiredMultiplier > adaptiveGainMultiplier
+                ? adaptiveGainRiseSmoothing
+                : adaptiveGainFallSmoothing
+
+            adaptiveGainMultiplier += (desiredMultiplier - adaptiveGainMultiplier) * smoothing
+            return adaptiveGainMultiplier
+        }
+    }
+
+    private func debugLogFinalizationDecisionIfNeeded(
+        detection: SpeechDetectionResult,
+        preparation: TranscriptionPreparation,
+        threshold: Float,
+        capturedSampleCount: Int
+    ) {
+        #if DEBUG
+        let captureDuration = Double(capturedSampleCount) / targetSampleRate
+        let asrDuration = preparation.shouldTranscribe ? preparation.transcriptionDurationSeconds : 0
+        let fallbackThreshold = threshold * fallbackWindowThresholdMultiplier
+        let speechLabel = preparation.shouldTranscribe ? "SPEECH" : "NO_SPEECH"
+
+        print(
+            "\(debugDescription(for: detection, threshold: threshold, label: speechLabel)) " +
+            "decision=\(preparation.decisionLabel) " +
+            "fallback=\(preparation.usedFallback ? "yes" : "no") " +
+            "capture=\(String(format: "%.2f", captureDuration))s " +
+            "asr=\(String(format: "%.2f", asrDuration))s " +
+            "fallbackWindowThreshold=\(String(format: "%.4f", fallbackThreshold)) " +
+            "fallbackMinDuration=\(String(format: "%.2f", fallbackMinimumSpeechDuration))s"
+        )
+        #endif
     }
 
     private func stopAudioEngine() {

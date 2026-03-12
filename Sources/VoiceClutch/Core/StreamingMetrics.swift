@@ -8,6 +8,7 @@ public struct StreamingMetricsSnapshot: Sendable {
     public let triggerToRecordingStartMs: Double
     public let triggerToAudioEngineStartMs: Double
     public let triggerToFirstTapMs: Double
+    public let triggerToCaptureReadyMs: Double
     public let triggerToASRStreamReadyMs: Double
     public let triggerToFirstPartialMs: Double
     public let bufferedSamplesFlushedOnStreamReady: Int
@@ -28,6 +29,7 @@ final class StreamingMetrics: @unchecked Sendable {
     private var triggerToRecordingStartMs = 0.0
     private var triggerToAudioEngineStartMs = 0.0
     private var triggerToFirstTapMs = 0.0
+    private var triggerToCaptureReadyMs = 0.0
     private var triggerToASRStreamReadyMs = 0.0
     private var triggerToFirstPartialMs = 0.0
     private var bufferedSamplesFlushedOnStreamReady = 0
@@ -78,6 +80,14 @@ final class StreamingMetrics: @unchecked Sendable {
         lock.lock()
         if triggerToFirstTapMs == 0 {
             triggerToFirstTapMs = elapsedSinceTriggerLocked()
+        }
+        lock.unlock()
+    }
+
+    func markCaptureReady() {
+        lock.lock()
+        if triggerToCaptureReadyMs == 0 {
+            triggerToCaptureReadyMs = elapsedSinceTriggerLocked()
         }
         lock.unlock()
     }
@@ -159,6 +169,7 @@ final class StreamingMetrics: @unchecked Sendable {
             triggerToRecordingStartMs: triggerToRecordingStartMs,
             triggerToAudioEngineStartMs: triggerToAudioEngineStartMs,
             triggerToFirstTapMs: triggerToFirstTapMs,
+            triggerToCaptureReadyMs: triggerToCaptureReadyMs,
             triggerToASRStreamReadyMs: triggerToASRStreamReadyMs,
             triggerToFirstPartialMs: triggerToFirstPartialMs,
             bufferedSamplesFlushedOnStreamReady: bufferedSamplesFlushedOnStreamReady,
@@ -180,6 +191,7 @@ final class StreamingMetrics: @unchecked Sendable {
         triggerToRecordingStartMs = 0
         triggerToAudioEngineStartMs = 0
         triggerToFirstTapMs = 0
+        triggerToCaptureReadyMs = 0
         triggerToASRStreamReadyMs = 0
         triggerToFirstPartialMs = 0
         bufferedSamplesFlushedOnStreamReady = 0
