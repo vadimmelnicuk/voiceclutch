@@ -2,7 +2,7 @@ import AppKit
 import QuartzCore
 
 @MainActor
-class StatusBarController: NSObject {
+class StatusBarController: NSObject, NSMenuDelegate {
     private var statusItem: NSStatusItem
     private var menu: NSMenu
     private var statusMenuItem: NSMenuItem?
@@ -20,6 +20,8 @@ class StatusBarController: NSObject {
     private var hasMissingPermissions = false
     private var previousHasMissingPermissions = false
     private var currentDownloadProgress: Double?
+    private var isStatusMenuOpen = false
+    private var pendingPreferencesOpen = false
 
     init(
         onShortcutChanged: @escaping @MainActor (ListeningShortcut) -> Void,
@@ -53,6 +55,7 @@ class StatusBarController: NSObject {
 
     private func setupMenu() {
         menu.autoenablesItems = false
+        menu.delegate = self
 
         // Status item (non-interactive, shows current state)
         let initialTitle = hasMissingPermissions ? "Permissions missing" : "Ready"
@@ -254,11 +257,33 @@ class StatusBarController: NSObject {
     // MARK: - Actions
 
     @objc private func showPreferences() {
-        preferencesWindowController.showWindow()
+        // Defer until menu tracking ends so the preferences window can become key.
+        pendingPreferencesOpen = true
+        DispatchQueue.main.async { [weak self] in
+            self?.openPendingPreferencesIfMenuClosed()
+        }
     }
 
     @objc private func quit() {
         NSApplication.shared.terminate(nil)
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        guard menu === self.menu else { return }
+        isStatusMenuOpen = false
+        openPendingPreferencesIfMenuClosed()
+    }
+
+    func menuWillOpen(_ menu: NSMenu) {
+        guard menu === self.menu else { return }
+        isStatusMenuOpen = true
+    }
+
+    private func openPendingPreferencesIfMenuClosed() {
+        guard pendingPreferencesOpen else { return }
+        guard !isStatusMenuOpen else { return }
+        pendingPreferencesOpen = false
+        preferencesWindowController.showWindow()
     }
 
     private func makeStatusMenuItemView(title: String, color: NSColor) -> NSView {

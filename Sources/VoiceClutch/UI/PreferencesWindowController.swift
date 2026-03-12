@@ -3,7 +3,7 @@ import Combine
 @preconcurrency import AVFoundation
 
 @MainActor
-class PreferencesWindowController: NSWindowController {
+class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private enum Layout {
         static let contentWidth: CGFloat = 520
         static let contentHeight: CGFloat = 588
@@ -33,6 +33,7 @@ class PreferencesWindowController: NSWindowController {
     private var customShortcutCaptureMonitor: Any?
     private var capturedShortcutCodes = Set<UInt32>()
     private var isCapturingCustomShortcut = false
+    private var shouldRestoreAccessoryActivationPolicy = false
     private let listeningShortcutMenuItems: [ListeningShortcut] = [
         .leftOption,
         .rightOption,
@@ -53,7 +54,7 @@ class PreferencesWindowController: NSWindowController {
         self.permissionsCoordinator = permissionsCoordinator
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: Layout.contentWidth, height: Layout.contentHeight),
-            styleMask: [.titled, .closable],
+            styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
         )
@@ -64,6 +65,7 @@ class PreferencesWindowController: NSWindowController {
         window.isReleasedWhenClosed = false
         
         super.init(window: window)
+        window.delegate = self
         setupContent()
         bindPermissionUpdates()
         enforceFixedWindowFrame()
@@ -806,6 +808,30 @@ class PreferencesWindowController: NSWindowController {
     @objc private func closePreferences() {
         close()
     }
+
+    private func beginPreferencesActivationContext() {
+        guard NSApp.activationPolicy() == .accessory else { return }
+        if NSApp.setActivationPolicy(.regular) {
+            shouldRestoreAccessoryActivationPolicy = true
+        }
+    }
+
+    private func endPreferencesActivationContext() {
+        guard shouldRestoreAccessoryActivationPolicy else { return }
+        _ = NSApp.setActivationPolicy(.accessory)
+        shouldRestoreAccessoryActivationPolicy = false
+    }
+
+    private func activatePreferencesWindow(_ window: NSWindow) {
+        NSRunningApplication.current.activate(options: [.activateAllWindows])
+        NSApp.activate(ignoringOtherApps: true)
+        window.makeKeyAndOrderFront(nil)
+        window.makeMain()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        endPreferencesActivationContext()
+    }
     
     func showWindow() {
         syncInteractionModeSelection()
@@ -815,7 +841,17 @@ class PreferencesWindowController: NSWindowController {
         syncMicrophoneChimePreference()
         permissionsCoordinator.refreshNow()
         enforceFixedWindowFrame()
-        window?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        beginPreferencesActivationContext()
+        guard let window else { return }
+        activatePreferencesWindow(window)
+
+        guard !window.isKeyWindow else { return }
+
+        // Some LSUIElement launch paths need a delayed second activation pass.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self, let window = self.window else { return }
+            guard !window.isKeyWindow else { return }
+            self.activatePreferencesWindow(window)
+        }
     }
 }
