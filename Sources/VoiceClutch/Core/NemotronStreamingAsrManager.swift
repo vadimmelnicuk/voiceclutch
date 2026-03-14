@@ -85,11 +85,6 @@ enum NemotronStreamingError: Error, LocalizedError {
 
 typealias NemotronPartialCallback = @Sendable (String) -> Void
 
-private struct NemotronBoostTerm: Sendable, Hashable {
-    let text: String
-    let tokenIds: [Int]
-}
-
 final class NemotronTokenizer: @unchecked Sendable {
     private struct TokenPiece {
         let id: Int
@@ -232,7 +227,6 @@ actor NemotronStreamingAsrManager {
 
     private var partialCallback: NemotronPartialCallback?
     private var processedChunks = 0
-    private var boostTerms: [NemotronBoostTerm] = []
 
     init(configuration: MLModelConfiguration = MLModelConfiguration()) {
         self.mlConfiguration = configuration
@@ -276,26 +270,6 @@ actor NemotronStreamingAsrManager {
 
         try resetStates()
         logger.info("Vendored Nemotron models loaded successfully")
-    }
-
-    func updateCustomVocabulary(_ snapshot: CustomVocabularySnapshot) {
-        guard let tokenizer else {
-            boostTerms = []
-            return
-        }
-
-        var dedupedTerms: [NemotronBoostTerm] = []
-        var seenTokenSequences = Set<[Int]>()
-        for candidate in Self.boostCandidates(from: snapshot) {
-            guard let tokenIds = tokenizer.encodeTerm(candidate), !tokenIds.isEmpty else {
-                continue
-            }
-            guard seenTokenSequences.insert(tokenIds).inserted else { continue }
-            dedupedTerms.append(NemotronBoostTerm(text: candidate, tokenIds: tokenIds))
-        }
-
-        boostTerms = dedupedTerms
-        logger.info("Prepared \(dedupedTerms.count) Nemotron boost terms from \(snapshot.manualEntries.count) manual entries and \(snapshot.learnedRules.count) learned rules")
     }
 
     func reset() async {
@@ -464,7 +438,7 @@ actor NemotronStreamingAsrManager {
                     throw NemotronStreamingError.processingFailed("Missing joint output")
                 }
 
-                let predictedToken = argmax(logits, boosts: boostScores(for: accumulatedTokenIds))
+                let predictedToken = argmax(logits)
                 if predictedToken == config.blankIdx {
                     break
                 }
@@ -486,69 +460,14 @@ actor NemotronStreamingAsrManager {
         }
     }
 
-    private func boostScores(for accumulatedTokens: [Int]) -> [Int: Float] {
-        guard !boostTerms.isEmpty else { return [:] }
-
-        var boosts: [Int: Float] = [:]
-        for term in boostTerms {
-            guard !term.tokenIds.isEmpty else { continue }
-
-            if term.tokenIds.count == 1 {
-                boosts[term.tokenIds[0], default: 0] += 1.4
-                continue
-            }
-
-            if let prefixLength = matchedPrefixLength(for: term.tokenIds, suffixOf: accumulatedTokens),
-               prefixLength < term.tokenIds.count {
-                boosts[term.tokenIds[prefixLength], default: 0] += 2.1
-                continue
-            }
-
-            if shouldBoostTermStart(term) {
-                boosts[term.tokenIds[0], default: 0] += 0.9
-            }
-        }
-        return boosts
-    }
-
-    private func matchedPrefixLength(for tokenIds: [Int], suffixOf accumulatedTokens: [Int]) -> Int? {
-        guard !accumulatedTokens.isEmpty else { return nil }
-
-        let maximumPrefix = min(tokenIds.count - 1, accumulatedTokens.count)
-        guard maximumPrefix > 0 else { return nil }
-
-        for prefixLength in stride(from: maximumPrefix, through: 1, by: -1) {
-            let accumulatedSuffix = Array(accumulatedTokens.suffix(prefixLength))
-            let termPrefix = Array(tokenIds.prefix(prefixLength))
-            if accumulatedSuffix == termPrefix {
-                return prefixLength
-            }
-        }
-
-        return nil
-    }
-
-    private func shouldBoostTermStart(_ term: NemotronBoostTerm) -> Bool {
-        guard
-            let tokenizer,
-            let firstTokenId = term.tokenIds.first,
-            let tokenValue = tokenizer.tokenValue(for: firstTokenId)
-        else {
-            return false
-        }
-
-        let stripped = tokenValue.replacingOccurrences(of: "\u{2581}", with: "")
-        return tokenValue.hasPrefix("\u{2581}") && stripped.count >= 4
-    }
-
-    private func argmax(_ logits: MLMultiArray, boosts: [Int: Float]) -> Int {
+    private func argmax(_ logits: MLMultiArray) -> Int {
         let vocabularySize = config.vocabSize + 1
         let pointer = logits.dataPointer.bindMemory(to: Float.self, capacity: logits.count)
 
         var bestIndex = 0
-        var bestValue = pointer[0] + (boosts[0] ?? 0)
+        var bestValue = pointer[0]
         for index in 1..<vocabularySize {
-            let candidate = pointer[index] + (boosts[index] ?? 0)
+            let candidate = pointer[index]
             if candidate > bestValue {
                 bestValue = candidate
                 bestIndex = index
@@ -557,21 +476,6 @@ actor NemotronStreamingAsrManager {
 
         return bestIndex
     }
-
-    private static func boostCandidates(from snapshot: CustomVocabularySnapshot) -> [String] {
-        var values = snapshot.manualEntries.map(\.canonical)
-        values.append(contentsOf: snapshot.learnedRules.map(\.target))
-
-        var dedupedValues: [String] = []
-        var seenValues = Set<String>()
-        for value in values {
-            let normalizedValue = CustomVocabularyManager.normalizedLookupKey(value)
-            guard !normalizedValue.isEmpty, seenValues.insert(normalizedValue).inserted else { continue }
-            dedupedValues.append(value)
-        }
-        return dedupedValues
-    }
-
     private func createAudioArray(_ samples: [Float]) throws -> MLMultiArray {
         let array = try MLMultiArray(shape: [1, NSNumber(value: samples.count)], dataType: .float32)
         let pointer = array.dataPointer.bindMemory(to: Float.self, capacity: samples.count)

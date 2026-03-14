@@ -12,6 +12,7 @@ final class TranscriptionSession {
     private(set) var isReady = false
 
     var onTranscriptionResult: ((String, Bool) -> Void)?
+    var onStateChange: ((VoiceClutchState) -> Void)?
 
     init(audioManager: AudioManager = AudioManager()) {
         self.audioManager = audioManager
@@ -32,6 +33,7 @@ final class TranscriptionSession {
 
         let warmUpStart = Date()
         var warmUpError: Error?
+        onStateChange?(.warmingUp)
         do {
             try await processor.warmUpIfNeeded()
         } catch {
@@ -42,6 +44,7 @@ final class TranscriptionSession {
         asrProcessor = processor
         audioManager.setASRProcessor(processor)
         isReady = true
+        onStateChange?(.idle)
 
         let totalDuration = Date().timeIntervalSince(prepareStart)
         debugLogPrepareTimings(

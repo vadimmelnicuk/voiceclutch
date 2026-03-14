@@ -186,6 +186,7 @@ final class CorrectionLearningMonitor {
 
         guard finishedSession.hasMeaningfulEdit else { return }
         guard finishedSession.currentText != finishedSession.originalText else { return }
+        guard AutoAddCorrectionsPreference.load() else { return }
         guard let learnedCorrection = deriveCorrection(
             from: finishedSession.originalText,
             to: finishedSession.currentText

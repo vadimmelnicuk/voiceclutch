@@ -67,12 +67,11 @@ public actor ASRProcessor {
         do {
             let modelDir = ModelDownloadManager.asrModelDirectory
             let modelConfiguration = MLModelConfiguration()
-            modelConfiguration.computeUnits = .cpuAndNeuralEngine
+            modelConfiguration.computeUnits = .all
             modelConfiguration.allowLowPrecisionAccumulationOnGPU = true
 
             let manager = NemotronStreamingAsrManager(configuration: modelConfiguration)
             try await manager.loadModels(modelDir: modelDir)
-            await manager.updateCustomVocabulary(CustomVocabularyManager.shared.snapshot())
 
             nemotronManager = manager
             isModelLoaded = true
@@ -112,7 +111,6 @@ public actor ASRProcessor {
         }
 
         await manager.reset()
-        await manager.updateCustomVocabulary(CustomVocabularyManager.shared.snapshot())
 
         resetPartialState(handler: onPartialTranscription)
 

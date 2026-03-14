@@ -344,25 +344,24 @@ public class AudioManager: @unchecked Sendable {
             threshold: silenceThreshold
         )
 
-        debugLogFinalizationDecisionIfNeeded(
-            detection: detection,
-            preparation: preparation,
-            threshold: silenceThreshold,
-            capturedSampleCount: finalizationState.bufferedAudio.count
-        )
-
         // If silence, clear streaming session and emit empty final so injected partials are removed.
         if !preparation.shouldTranscribe {
             resetStreamingSession()
             StreamingMetrics.shared.markFinalDelivered()
-            debugLogStreamingMetricsIfNeeded()
+            debugLogInteractionSummaryIfNeeded(
+                preparation: preparation,
+                capturedSampleCount: finalizationState.bufferedAudio.count
+            )
             finalizationState.callback?("", true)
             return
         }
 
         guard let asrProcessor else {
             StreamingMetrics.shared.markFinalDelivered()
-            debugLogStreamingMetricsIfNeeded()
+            debugLogInteractionSummaryIfNeeded(
+                preparation: preparation,
+                capturedSampleCount: finalizationState.bufferedAudio.count
+            )
             finalizationState.callback?("", true)
             return
         }
@@ -403,7 +402,10 @@ public class AudioManager: @unchecked Sendable {
 
             await MainActor.run {
                 StreamingMetrics.shared.markFinalDelivered()
-                self.debugLogStreamingMetricsIfNeeded()
+                self.debugLogInteractionSummaryIfNeeded(
+                    preparation: preparation,
+                    capturedSampleCount: finalizationState.bufferedAudio.count
+                )
                 finalizationState.callback?(transcription, true)
             }
         }
@@ -687,17 +689,22 @@ public class AudioManager: @unchecked Sendable {
         return try operationResult.get()
     }
 
-    private func debugLogStreamingMetricsIfNeeded() {
+    private func debugLogInteractionSummaryIfNeeded(
+        preparation: TranscriptionPreparation,
+        capturedSampleCount: Int
+    ) {
         #if DEBUG
+        let captureDuration = Double(capturedSampleCount) / targetSampleRate
+        let asrDuration = preparation.shouldTranscribe ? preparation.transcriptionDurationSeconds : 0
+        let speechLabel = preparation.shouldTranscribe ? "SPEECH" : "NO_SPEECH"
         let snapshot = StreamingMetrics.shared.snapshot()
         print(
-            "⏱️ startup record=\(formatMetricMs(snapshot.triggerToRecordingStartMs)) " +
-            "engine=\(formatMetricMs(snapshot.triggerToAudioEngineStartMs)) " +
-            "tap=\(formatMetricMs(snapshot.triggerToFirstTapMs)) " +
+            "🎤 \(speechLabel) " +
+            "decision=\(preparation.decisionLabel) " +
+            "fallback=\(preparation.usedFallback ? "yes" : "no") " +
+            "capture=\(String(format: "%.2f", captureDuration))s " +
+            "asr=\(String(format: "%.2f", asrDuration))s " +
             "captureReady=\(formatMetricMs(snapshot.triggerToCaptureReadyMs)) " +
-            "stream=\(formatMetricMs(snapshot.triggerToASRStreamReadyMs)) " +
-            "partial=\(formatMetricMs(snapshot.triggerToFirstPartialMs)) " +
-            "flush=\(snapshot.bufferedSamplesFlushedOnStreamReady) samples " +
             "stopToFinal=\(formatMetricMs(snapshot.lastStopToFinalMs))"
         )
         #endif
@@ -836,21 +843,6 @@ public class AudioManager: @unchecked Sendable {
         )
     }
 
-    private func debugDescription(
-        for detection: SpeechDetectionResult,
-        threshold: Float,
-        label: String
-    ) -> String {
-        let windowThreshold = threshold * windowThresholdMultiplier
-
-        return
-            "🎤 \(label) via \(detection.trigger) " +
-            "rms=\(String(format: "%.4f", detection.rmsEnergy))/\(String(format: "%.4f", threshold)) " +
-            "peak=\(String(format: "%.4f", detection.peakAmplitude)) " +
-            "maxWindowRMS=\(String(format: "%.4f", detection.maxWindowRms))/\(String(format: "%.4f", windowThreshold)) " +
-            "windowRun=\(detection.longestWindowRun)/\(requiredConsecutiveSpeechWindows)"
-    }
-
     private func calculateInputRMS(samples: UnsafePointer<Float>, count: Int) -> Float {
         guard count > 0 else { return 0 }
 
@@ -882,30 +874,6 @@ public class AudioManager: @unchecked Sendable {
             adaptiveGainMultiplier += (desiredMultiplier - adaptiveGainMultiplier) * smoothing
             return adaptiveGainMultiplier
         }
-    }
-
-    private func debugLogFinalizationDecisionIfNeeded(
-        detection: SpeechDetectionResult,
-        preparation: TranscriptionPreparation,
-        threshold: Float,
-        capturedSampleCount: Int
-    ) {
-        #if DEBUG
-        let captureDuration = Double(capturedSampleCount) / targetSampleRate
-        let asrDuration = preparation.shouldTranscribe ? preparation.transcriptionDurationSeconds : 0
-        let fallbackThreshold = threshold * fallbackWindowThresholdMultiplier
-        let speechLabel = preparation.shouldTranscribe ? "SPEECH" : "NO_SPEECH"
-
-        print(
-            "\(debugDescription(for: detection, threshold: threshold, label: speechLabel)) " +
-            "decision=\(preparation.decisionLabel) " +
-            "fallback=\(preparation.usedFallback ? "yes" : "no") " +
-            "capture=\(String(format: "%.2f", captureDuration))s " +
-            "asr=\(String(format: "%.2f", asrDuration))s " +
-            "fallbackWindowThreshold=\(String(format: "%.4f", fallbackThreshold)) " +
-            "fallbackMinDuration=\(String(format: "%.2f", fallbackMinimumSpeechDuration))s"
-        )
-        #endif
     }
 
     private func attachChimePlayerNode(to engine: AVAudioEngine) -> AVAudioPlayerNode? {

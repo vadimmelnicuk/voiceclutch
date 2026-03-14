@@ -44,6 +44,11 @@ public final class TranscriptionBootstrapper: ObservableObject {
         set { transcriptionSession.onTranscriptionResult = newValue }
     }
 
+    public var onStateChange: ((VoiceClutchState) -> Void)? {
+        get { transcriptionSession.onStateChange }
+        set { transcriptionSession.onStateChange = newValue }
+    }
+
     public func areModelsInstalled() -> Bool {
         ModelDownloadManager.areModelsInstalled()
     }
@@ -52,16 +57,25 @@ public final class TranscriptionBootstrapper: ObservableObject {
         try? await downloadManager.getDownloadSize()
     }
 
-    public func prepareForUse(onModelLoading: (() -> Void)? = nil) async throws -> PreparationOutcome {
+    @discardableResult
+    public func downloadAsrModelsIfNeeded() async throws -> Bool {
         let hadExistingModels = areModelsInstalled()
-
         if !hadExistingModels {
             try await downloadManager.downloadAsrModels()
+            return true
         }
+        return false
+    }
 
+    public func prepareSession(onModelLoading: (() -> Void)? = nil) async throws {
         onModelLoading?()
         try await transcriptionSession.prepare()
-        return hadExistingModels ? .usedExistingModels : .downloadedModels
+    }
+
+    public func prepareForUse(onModelLoading: (() -> Void)? = nil) async throws -> PreparationOutcome {
+        let downloadedAsrModels = try await downloadAsrModelsIfNeeded()
+        try await prepareSession(onModelLoading: onModelLoading)
+        return downloadedAsrModels ? .downloadedModels : .usedExistingModels
     }
 
     public func startRecording(onCaptureReady: (@MainActor @Sendable () -> Void)? = nil) throws {

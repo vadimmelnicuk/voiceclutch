@@ -20,13 +20,13 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private var hasMissingPermissions = false
     private var previousHasMissingPermissions = false
     private var currentDownloadProgress: Double?
+    private var currentDownloadModelLabel = "model"
     private var isStatusMenuOpen = false
     private var pendingPreferencesOpen = false
 
     init(
         onShortcutChanged: @escaping @MainActor (ListeningShortcut) -> Void,
         onInteractionModeChanged: @escaping @MainActor (ListeningInteractionMode) -> Void,
-        onManageVocabulary: @escaping @MainActor () -> Void,
         permissionsCoordinator: PermissionsCoordinator
     ) {
         // Use a square status item when showing an icon.
@@ -37,7 +37,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
         preferencesWindowController = PreferencesWindowController(
             onShortcutChanged: onShortcutChanged,
             onInteractionModeChanged: onInteractionModeChanged,
-            onManageVocabulary: onManageVocabulary,
             permissionsCoordinator: permissionsCoordinator
         )
         toolbarIcon = Self.loadToolbarIcon()
@@ -155,17 +154,14 @@ class StatusBarController: NSObject, NSMenuDelegate {
                 title = "Processing"
                 color = .systemBlue
             case .downloading:
-                if let currentDownloadProgress {
-                    let percent = Int((currentDownloadProgress * 100).rounded())
-                    let clampedPercent = max(0, min(100, percent))
-                    title = "Downloading model \(clampedPercent)%"
-                } else {
-                    title = "Downloading model"
-                }
+                title = downloadingTitle()
                 color = .systemGray
             case .loadingModel:
-                title = "Loading model"
+                title = "Loading models"
                 color = .systemGray
+            case .warmingUp:
+                title = "Warming up ASR"
+                color = .systemYellow
             }
         }
 
@@ -190,9 +186,17 @@ class StatusBarController: NSObject, NSMenuDelegate {
             return
         }
 
-        let progressPercent = Int((progress * 100).rounded())
-        let clampedPercent = max(0, min(100, progressPercent))
-        setStatusMenuLabel(title: "Downloading model \(clampedPercent)%", color: .systemGray)
+        setStatusMenuLabel(title: downloadingTitle(), color: .systemGray)
+    }
+
+    func updateDownloadModelLabel(_ label: String?) {
+        currentDownloadModelLabel = label ?? "model"
+
+        guard currentMenuState == .downloading, !hasMissingPermissions else {
+            return
+        }
+
+        setStatusMenuLabel(title: downloadingTitle(), color: .systemGray)
     }
 
     func showToolbarNotification(_ message: String, duration: TimeInterval = 3.0) {
@@ -443,9 +447,9 @@ class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     private func applyToolbarOpacity(for state: VoiceClutchState, on button: NSStatusBarButton) {
-        let isDimmedState = state == .downloading || state == .loadingModel || hasMissingPermissions
+        let isDimmedState = state == .downloading || state == .loadingModel || state == .warmingUp || hasMissingPermissions
         let targetOpacity: CGFloat = isDimmedState ? 0.5 : 1.0
-        let wasDimmedState = previousState == .downloading || previousState == .loadingModel || previousHasMissingPermissions
+        let wasDimmedState = previousState == .downloading || previousState == .loadingModel || previousState == .warmingUp || previousHasMissingPermissions
         let isExitingDimmedState = wasDimmedState && !isDimmedState
 
         if isExitingDimmedState {
@@ -463,7 +467,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
     private func fallbackEmoji(for state: VoiceClutchState) -> String {
         switch state {
-        case .idle, .downloading, .loadingModel:
+        case .idle, .downloading, .loadingModel, .warmingUp:
             return "⚫"
         case .recording:
             return "🔴"
@@ -481,9 +485,21 @@ class StatusBarController: NSObject, NSMenuDelegate {
         case .processing:
             return "VoiceClutch: Processing"
         case .downloading:
-            return "VoiceClutch: Downloading model"
+            return "VoiceClutch: Downloading \(currentDownloadModelLabel)"
         case .loadingModel:
-            return "VoiceClutch: Loading model"
+            return "VoiceClutch: Loading models"
+        case .warmingUp:
+            return "VoiceClutch: Warming up ASR"
         }
+    }
+
+    private func downloadingTitle() -> String {
+        if let currentDownloadProgress {
+            let percent = Int((currentDownloadProgress * 100).rounded())
+            let clampedPercent = max(0, min(100, percent))
+            return "Downloading \(currentDownloadModelLabel) \(clampedPercent)%"
+        }
+
+        return "Downloading \(currentDownloadModelLabel)"
     }
 }

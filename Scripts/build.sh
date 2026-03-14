@@ -43,6 +43,11 @@ EXECUTABLE="${BUILD_DIR}/${APP_NAME}"
 START_TIME=$(date +%s)
 PID_FILE="/tmp/voiceclutch-debug.pid"
 
+# Timestamp function matching app log format [HH:MM:SS.mmm]
+timestamp() {
+    date +"[%H:%M:%S.%3N]"
+}
+
 terminate_pid_gracefully() {
     local pid="$1"
     local label="$2"
@@ -149,11 +154,108 @@ terminate_stale_debug_processes() {
 }
 
 if [ "$BUILD_FOR_PRODUCTION" = true ]; then
-    echo "🔨 Building VoiceClutch for PRODUCTION (Release configuration)..."
-    swift build -c release
+    echo "🔨 $(timestamp) Building VoiceClutch for PRODUCTION (Release configuration)..."
+    XCODE_BUILD_DIR=".build/arm64-apple-macosx/release"
+    CONFIG="Release"
 else
-    echo "🔨 Building VoiceClutch (Debug configuration)..."
-    swift build -c debug
+    echo "🔨 $(timestamp) Building VoiceClutch (Debug configuration)..."
+    XCODE_BUILD_DIR=".build/arm64-apple-macosx/debug"
+    CONFIG="Debug"
+fi
+
+SWIFT_CONFIG="$(echo "$CONFIG" | tr '[:upper:]' '[:lower:]')"
+MLX_BUNDLE_NAME="mlx-swift_Cmlx.bundle"
+XCODE_DERIVED_DATA_PATH=".build/xcode-derived-data"
+XCODE_PRODUCTS_DIR="${XCODE_DERIVED_DATA_PATH}/Build/Products/${CONFIG}"
+METAL_CACHE_DIR=".build/metal-cache/${CONFIG}"
+CACHED_MLX_BUNDLE="${METAL_CACHE_DIR}/${MLX_BUNDLE_NAME}"
+METAL_CACHE_STAMP="${METAL_CACHE_DIR}/shader-cache.stamp"
+
+should_rebuild_metal_shaders() {
+    local shader_input_mtime=0
+    local file_mtime
+    local mlx_metal_max_mtime
+
+    for tracked_file in "Package.swift" "Package.resolved"; do
+        if [ -f "$tracked_file" ]; then
+            file_mtime=$(stat -f "%m" "$tracked_file" 2>/dev/null || echo "0")
+            if [ "$file_mtime" -gt "$shader_input_mtime" ]; then
+                shader_input_mtime="$file_mtime"
+            fi
+        fi
+    done
+
+    if [ -d ".build/checkouts/mlx-swift" ]; then
+        mlx_metal_max_mtime=$(
+            find ".build/checkouts/mlx-swift" -type f \( -name "*.metal" -o -name "*.metallib" \) \
+                -exec stat -f "%m" {} \; 2>/dev/null | sort -nr | head -1
+        )
+        if [ -n "$mlx_metal_max_mtime" ] && [ "$mlx_metal_max_mtime" -gt "$shader_input_mtime" ]; then
+            shader_input_mtime="$mlx_metal_max_mtime"
+        fi
+    fi
+
+    if [ ! -d "$CACHED_MLX_BUNDLE" ] || [ ! -f "$METAL_CACHE_STAMP" ]; then
+        return 0
+    fi
+
+    local cache_stamp_mtime
+    cache_stamp_mtime=$(stat -f "%m" "$METAL_CACHE_STAMP" 2>/dev/null || echo "0")
+    if [ "$cache_stamp_mtime" -ge "$shader_input_mtime" ]; then
+        return 1
+    fi
+    return 0
+}
+
+if should_rebuild_metal_shaders; then
+    # Use xcodebuild to build with Metal shader support only when shader inputs changed.
+    echo "Building with xcodebuild to compile Metal shaders..."
+    if xcodebuild \
+        -scheme VoiceClutch \
+        -configuration "$CONFIG" \
+        -destination 'platform=macOS' \
+        -derivedDataPath "$XCODE_DERIVED_DATA_PATH" \
+        build; then
+        echo "✅ xcodebuild successful"
+        USE_XCODEBUILD=true
+
+        if [ -d "$XCODE_PRODUCTS_DIR/$MLX_BUNDLE_NAME" ]; then
+            mkdir -p "$METAL_CACHE_DIR"
+            rm -rf "$CACHED_MLX_BUNDLE"
+            cp -R "$XCODE_PRODUCTS_DIR/$MLX_BUNDLE_NAME" "$CACHED_MLX_BUNDLE"
+            touch "$METAL_CACHE_STAMP"
+            echo "♻️  Updated cached MLX Metal shader bundle"
+        fi
+    else
+        # If xcodebuild fails (no scheme), fall back to swift build.
+        echo "⚠️  xcodebuild failed, using swift build"
+        echo "⚠️  Note: Metal shaders require Xcode to build properly"
+        swift build -c "$SWIFT_CONFIG"
+        USE_XCODEBUILD=false
+    fi
+else
+    echo "♻️  Reusing cached MLX Metal shader bundle (skipping xcodebuild)"
+    swift build -c "$SWIFT_CONFIG"
+    USE_XCODEBUILD=false
+fi
+
+# Set the correct executable path based on what was built
+if [ "$USE_XCODEBUILD" = true ]; then
+    if [ -f "$XCODE_PRODUCTS_DIR/$APP_NAME" ]; then
+        EXECUTABLE="$XCODE_PRODUCTS_DIR/$APP_NAME"
+    else
+        echo "Error: Could not find built executable in Xcode DerivedData"
+        exit 1
+    fi
+elif [ -f "$XCODE_BUILD_DIR/$APP_NAME" ]; then
+    EXECUTABLE="$XCODE_BUILD_DIR/$APP_NAME"
+elif [ -f ".build/debug/$APP_NAME" ]; then
+    EXECUTABLE=".build/debug/$APP_NAME"
+elif [ -f ".build/release/$APP_NAME" ]; then
+    EXECUTABLE=".build/release/$APP_NAME"
+else
+    echo "Error: Could not find built executable"
+    exit 1
 fi
 
 END_TIME=$(date +%s)
@@ -205,7 +307,32 @@ else
     echo "⚠️  Warning: Chime assets folder not found (Resources/Chimes)"
 fi
 
-echo "✅ Build successful!"
+# Copy MLX bundle (containing Metal shaders) to app bundle
+# This is required for MLX to find the compiled metallib at runtime
+if [ -d "$XCODE_PRODUCTS_DIR/$MLX_BUNDLE_NAME" ]; then
+    echo "📦 Copying MLX Metal shader bundle..."
+    cp -R "$XCODE_PRODUCTS_DIR/$MLX_BUNDLE_NAME" "${APP_BUNDLE}/Contents/Resources/"
+    echo "   Copied: $XCODE_PRODUCTS_DIR/$MLX_BUNDLE_NAME"
+elif [ -d "$CACHED_MLX_BUNDLE" ]; then
+    echo "📦 Copying cached MLX Metal shader bundle..."
+    cp -R "$CACHED_MLX_BUNDLE" "${APP_BUNDLE}/Contents/Resources/"
+    echo "   Copied: $CACHED_MLX_BUNDLE"
+elif [ -n "$XCODE_PRODUCTS_DIR" ]; then
+    # Try to find the MLX bundle in DerivedData
+    DERIVED_DATA_MLX=$(find ~/Library/Developer/Xcode/DerivedData -name "$MLX_BUNDLE_NAME" -type d 2>/dev/null | head -1)
+    if [ -n "$DERIVED_DATA_MLX" ]; then
+        echo "📦 Copying MLX Metal shader bundle from DerivedData..."
+        cp -R "$DERIVED_DATA_MLX" "${APP_BUNDLE}/Contents/Resources/"
+        echo "   Copied: $DERIVED_DATA_MLX"
+    else
+        echo "⚠️  Warning: MLX bundle not found - Metal shaders may not work"
+        echo "   Searched in: $XCODE_PRODUCTS_DIR and DerivedData"
+    fi
+else
+    echo "⚠️  Warning: MLX bundle not found - Metal shaders may not work"
+fi
+
+echo "✅ $(timestamp) Build successful!"
 echo ""
 echo "App bundle location: ${APP_BUNDLE}"
 

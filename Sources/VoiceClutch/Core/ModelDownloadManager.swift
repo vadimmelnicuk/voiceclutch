@@ -43,14 +43,16 @@ class ModelDownloadManager: ObservableObject {
         modelsRootDirectory.appendingPathComponent(NemotronModelRepository.folderName, isDirectory: true)
     }
 
-    nonisolated private static var modelsRootDirectory: URL {
+    nonisolated static var appSupportDirectory: URL {
         let appSupport = FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         ).first!
-        return appSupport
-            .appendingPathComponent("voiceclutch", isDirectory: true)
-            .appendingPathComponent("models", isDirectory: true)
+        return appSupport.appendingPathComponent("voiceclutch", isDirectory: true)
+    }
+
+    nonisolated static var modelsRootDirectory: URL {
+        appSupportDirectory.appendingPathComponent("models", isDirectory: true)
     }
 
     nonisolated static func areModelsInstalled() -> Bool {

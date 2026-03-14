@@ -35,7 +35,7 @@ final class PermissionsCoordinator: ObservableObject {
     func startMonitoring() {
         if refreshTimer == nil {
             refreshTimer = Timer.scheduledTimer(withTimeInterval: Constants.refreshInterval, repeats: true) { [weak self] _ in
-                Task { @MainActor in
+                DispatchQueue.main.async { [weak self] in
                     self?.refreshNow()
                 }
             }

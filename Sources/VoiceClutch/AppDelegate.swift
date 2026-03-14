@@ -6,6 +6,31 @@ import Dispatch
 // Import core components
 @preconcurrency import AVFoundation
 
+// Timestamp formatter matching log format [HH:MM:SS.mmm]
+extension DateFormatter {
+    static let timestamp: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "[HH:mm:ss.SSS]"
+        return formatter
+    }()
+}
+
+private func makeMemoryPressureEventHandler(
+    source: DispatchSourceMemoryPressure,
+    owner: AppDelegate
+) -> @Sendable () -> Void {
+    { [weak owner, unowned source] in
+        let eventMask = source.data
+        guard eventMask.contains(.warning) || eventMask.contains(.critical) else {
+            return
+        }
+
+        Task { @MainActor [weak owner] in
+            owner?.handleMemoryPressureEvent(eventMask)
+        }
+    }
+}
+
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
     @Published private(set) var currentState: VoiceClutchState = .idle
@@ -18,7 +43,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let mediaPlaybackController = MediaPlaybackController()
     private let permissionsCoordinator = PermissionsCoordinator()
     private var statusBarController: StatusBarController?
-    private let vocabularyWindowController = VocabularyWindowController()
     private var currentInteractionMode = ListeningInteractionMode.load()
     private var currentListeningShortcut = ListeningShortcut.load()
     private var currentListeningShortcutConfig: HotkeyConfig = ListeningShortcut.load().hotkeyConfig
@@ -57,6 +81,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusBar()
         setupCorrectionLearning()
         setupDictationController()
+        if !dictationController.areModelsInstalled() {
+            dictationController.setState(.loadingModel)
+        }
         setupStateObserving()
         setupMemoryPressureMonitoring()
         setupPermissionMonitoring()
@@ -75,24 +102,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // First launch - download models
 
             if let downloadSizeBytes = await dictationController.requiredDownloadSize() {
-                let downloadSizeMB = downloadSizeBytes / 1_048_576
-                await showFirstLaunchAlert(sizeMB: downloadSizeMB)
+                await showFirstLaunchAlert(sizeBytes: downloadSizeBytes)
             } else {
                 // Fall back to showing alert without size
-                await showFirstLaunchAlert(sizeMB: nil)
+                await showFirstLaunchAlert(sizeBytes: nil)
             }
 
             dictationController.setState(.downloading)
         }
 
+        // Start LLM preload in parallel with ASR preparation
+        LocalLLMCoordinator.preloadModelInBackground()
+
         do {
             let outcome = try await dictationController.prepareForUse()
             #if DEBUG
-            print("✅ VoiceClutch ready")
+            let timestamp = DateFormatter.timestamp.string(from: Date())
+            print("\(timestamp) ✅ VoiceClutch ready")
             #endif
 
             if outcome == .downloadedModels {
-                await showDownloadCompleteNotification()
+                showDownloadCompleteNotification()
             }
         } catch {
             print("❌ Model download failed: \(error)")
@@ -117,41 +147,47 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func showFirstLaunchAlert(sizeMB: Int64?) async {
+    private func showFirstLaunchAlert(sizeBytes: Int64?) async {
         let alert = NSAlert()
-        alert.messageText = "Downloading required model"
+        alert.messageText = "Downloading required models"
 
         let sizeText: String
-        if let sizeMB = sizeMB {
-            sizeText = "\(sizeMB) MB"
+        if let sizeBytes = sizeBytes {
+            let sizeGB = Double(sizeBytes) / 1_073_741_824.0
+            let roundedGB = (sizeGB * 10).rounded() / 10
+            if roundedGB == floor(roundedGB) {
+                sizeText = "\(Int(roundedGB)) GB"
+            } else {
+                sizeText = String(format: "%.1f GB", roundedGB)
+            }
         } else {
-            sizeText = "600 MB"
+            sizeText = "1 GB"
         }
 
-        alert.informativeText = "VoiceClutch needs to download speech recognition model (\(sizeText)). This only happens once."
+        alert.informativeText = "VoiceClutch needs to download local models (\(sizeText)). This only happens once."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }
 
-    private func showDownloadCompleteNotification() async {
-        let alert = NSAlert()
-        alert.messageText = "Model downloaded successfully"
-        alert.informativeText = "VoiceClutch will be ready to use once the model is loaded into memory."
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+    private func showDownloadCompleteNotification() {
+        statusBarController?.showToolbarNotification(
+            "VoiceClutch is ready.\nPress and hold Left Control to start dictation.",
+            duration: 5.0
+        )
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Cancel dispatch sources FIRST before any other cleanup
+        memoryPressureSource?.cancel()
+        memoryPressureSource = nil
+
         hotkeyManager.unregister()
         hotkeyRecoveryTimer?.invalidate()
         hotkeyRecoveryTimer = nil
         missingPermissionShortcutFeedbackTimer?.invalidate()
         missingPermissionShortcutFeedbackTimer = nil
         permissionsCoordinator.stopMonitoring()
-        memoryPressureSource?.cancel()
-        memoryPressureSource = nil
         resumeMediaIfNeeded()
         dictationController.shutdown()
         CorrectionLearningMonitor.shared.cancel()
@@ -167,19 +203,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             onInteractionModeChanged: { [weak self] mode in
                 self?.applyListeningInteractionMode(mode)
             },
-            onManageVocabulary: { [weak self] in
-                self?.showVocabularyWindow()
-            },
             permissionsCoordinator: permissionsCoordinator
         )
     }
 
     private func setupCorrectionLearning() {
         CorrectionLearningMonitor.shared.installEventMonitors()
-    }
-
-    private func showVocabularyWindow() {
-        vocabularyWindowController.showWindow()
     }
 
     private func setupDictationController() {
@@ -195,6 +224,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] progress in
                 self?.downloadProgress = progress
                 self?.statusBarController?.updateDownloadProgress(progress)
+            }
+            .store(in: &cancellables)
+
+        dictationController.$downloadModelLabel
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] label in
+                self?.statusBarController?.updateDownloadModelLabel(label)
             }
             .store(in: &cancellables)
     }
@@ -214,7 +250,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         hotkeyRecoveryTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { @MainActor in
+            DispatchQueue.main.async { [weak self] in
                 self?.retryHotkeyRegistrationIfNeeded()
             }
         }
@@ -307,18 +343,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             queue: DispatchQueue.global(qos: .utility)
         )
 
-        source.setEventHandler { [weak self] in
-            Task { @MainActor in
-                self?.handleMemoryPressureEvent()
-            }
-        }
+        // The dispatch source may fire on a background queue, so capture its
+        // data there and hop explicitly to MainActor before touching app state.
+        source.setEventHandler(handler: makeMemoryPressureEventHandler(source: source, owner: self))
 
         source.resume()
         memoryPressureSource = source
     }
 
-    private func handleMemoryPressureEvent() {
-        guard let eventMask = memoryPressureSource?.data else { return }
+    fileprivate func handleMemoryPressureEvent(_ eventMask: DispatchSource.MemoryPressureEvent) {
         guard eventMask.contains(.warning) || eventMask.contains(.critical) else { return }
         _ = dictationController.compactMemoryIfIdle()
     }
@@ -431,7 +464,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         case .processing:
             return
-        case .idle, .downloading, .loadingModel:
+        case .idle, .downloading, .loadingModel, .warmingUp:
             break
         }
 
@@ -440,7 +473,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         switch currentState {
-        case .downloading, .loadingModel:
+        case .downloading, .loadingModel, .warmingUp:
             showNotReadyNotification()
             return
         case .idle:
@@ -502,15 +535,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        Task { @MainActor [weak self] in
-            guard let self else { return }
+        // We're already on MainActor (AppDelegate is @MainActor), so we can await directly
+        let didPauseMedia = await mediaPlaybackController.pauseIfActive()
+        guard didPauseMedia else { return }
 
-            let didPauseMedia = await self.mediaPlaybackController.pauseIfActive()
-            guard didPauseMedia else { return }
-
-            if self.currentState != .recording {
-                self.resumeMediaIfNeeded()
-            }
+        if currentState != .recording {
+            resumeMediaIfNeeded()
         }
     }
 
@@ -603,7 +633,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         case .downloading:
             message = "VoiceClutch is downloading model"
         case .loadingModel:
-            message = "VoiceClutch is loading model"
+            message = "VoiceClutch is loading models"
+        case .warmingUp:
+            message = "VoiceClutch is warming up"
         default:
             message = "VoiceClutch is still getting ready"
         }
@@ -629,7 +661,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             withTimeInterval: 0.1,
             repeats: true
         ) { [weak self] _ in
-            Task { @MainActor in
+            DispatchQueue.main.async { [weak self] in
                 self?.pollMissingPermissionShortcutState()
             }
         }

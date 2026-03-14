@@ -18,14 +18,16 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
 
     private let onShortcutChanged: @MainActor (ListeningShortcut) -> Void
     private let onInteractionModeChanged: @MainActor (ListeningInteractionMode) -> Void
-    private let onManageVocabulary: @MainActor () -> Void
     private let permissionsCoordinator: PermissionsCoordinator
+    private let vocabularyWindowController = VocabularyWindowController()
     private let holdToTalkRadioButton = NSButton(radioButtonWithTitle: "Hold-to-talk", target: nil, action: nil)
     private let listenToggleRadioButton = NSButton(radioButtonWithTitle: "Press-to-talk", target: nil, action: nil)
     private let shortcutPopup = NSPopUpButton(frame: .zero, pullsDown: false)
     private let clipboardRecoverySwitch = NSSwitch(frame: .zero)
     private let mediaPauseSwitch = NSSwitch(frame: .zero)
     private let microphoneChimeSwitch = NSSwitch(frame: .zero)
+    private let autoAddCorrectionsSwitch = NSSwitch(frame: .zero)
+    private let smartFormattingSwitch = NSSwitch(frame: .zero)
     private let accessibilityPermissionIndicator = NSView()
     private let accessibilityPermissionButton = NSButton(title: "Grant", target: nil, action: nil)
     private let microphonePermissionIndicator = NSView()
@@ -48,12 +50,10 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     init(
         onShortcutChanged: @escaping @MainActor (ListeningShortcut) -> Void,
         onInteractionModeChanged: @escaping @MainActor (ListeningInteractionMode) -> Void,
-        onManageVocabulary: @escaping @MainActor () -> Void,
         permissionsCoordinator: PermissionsCoordinator
     ) {
         self.onShortcutChanged = onShortcutChanged
         self.onInteractionModeChanged = onInteractionModeChanged
-        self.onManageVocabulary = onManageVocabulary
         self.permissionsCoordinator = permissionsCoordinator
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: Layout.contentWidth, height: Layout.contentHeight),
@@ -149,11 +149,29 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
             control: microphoneChimeSwitch
         )
 
+        configureToggle(autoAddCorrectionsSwitch, action: #selector(autoAddCorrectionsPreferenceChanged(_:)))
+        syncAutoAddCorrectionsPreference()
+
+        let autoAddCorrectionsRow = makeSettingsRow(
+            title: "Auto corrections",
+            detail: "Learn proper nouns and acronyms from accepted transcript edits.",
+            control: autoAddCorrectionsSwitch
+        )
+
+        configureToggle(smartFormattingSwitch, action: #selector(smartFormattingPreferenceChanged(_:)))
+        syncSmartFormattingPreference()
+
+        let smartFormattingRow = makeSettingsRow(
+            title: "LLM-powered formatting",
+            detail: "Run an optional LLM pass on the final transcript.",
+            control: smartFormattingSwitch
+        )
+
         let vocabularyButton = NSButton(title: "Manage", target: self, action: #selector(manageVocabulary))
         vocabularyButton.bezelStyle = .rounded
         let vocabularyRow = makeSettingsRow(
-            title: "Custom vocabulary",
-            detail: "Edit manual terms and review learned corrections in a separate window.",
+            title: "Vocabulary",
+            detail: "Edit manual replacements and manage learned auto corrections.",
             control: vocabularyButton,
             showsSeparator: false
         )
@@ -205,9 +223,18 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         let listeningBehaviorGroup = makeSettingsGroup(rows: [
             clipboardRecoveryRow,
             mediaPauseRow,
-            microphoneChimeRow,
+            microphoneChimeRow
+        ])
+
+        let correctionsGroup = makeSettingsGroup(rows: [
+            smartFormattingRow,
+            autoAddCorrectionsRow,
             vocabularyRow
         ])
+        let correctionsSection = makeSettingsSection(
+            title: "Corrections",
+            group: correctionsGroup
+        )
 
         let permissionsGroup = makeSettingsGroup(rows: [
             accessibilityPermissionRow,
@@ -224,6 +251,7 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
             softwareUpdateGroup,
             interactionGroup,
             listeningBehaviorGroup,
+            correctionsSection,
             permissionsSection
         ])
         groupsStack.orientation = .vertical
@@ -231,7 +259,7 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         groupsStack.distribution = .fill
         groupsStack.spacing = 8
         groupsStack.translatesAutoresizingMaskIntoConstraints = false
-        groupsStack.setCustomSpacing(14, after: listeningBehaviorGroup)
+        groupsStack.setCustomSpacing(14, after: correctionsSection)
 
         let doneButton = NSButton(title: "Done", target: self, action: #selector(closePreferences))
         doneButton.translatesAutoresizingMaskIntoConstraints = false
@@ -538,6 +566,14 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         microphoneChimeSwitch.state = MicrophoneChimePreference.load() ? .on : .off
     }
 
+    private func syncAutoAddCorrectionsPreference() {
+        autoAddCorrectionsSwitch.state = AutoAddCorrectionsPreference.load() ? .on : .off
+    }
+
+    private func syncSmartFormattingPreference() {
+        smartFormattingSwitch.state = LocalSmartFormattingPreference.load() ? .on : .off
+    }
+
     private func bindPermissionUpdates() {
         permissionsCoordinator.$snapshot
             .receive(on: DispatchQueue.main)
@@ -786,6 +822,14 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         MicrophoneChimePreference.save(sender.state == .on)
     }
 
+    @objc private func autoAddCorrectionsPreferenceChanged(_ sender: NSSwitch) {
+        AutoAddCorrectionsPreference.save(sender.state == .on)
+    }
+
+    @objc private func smartFormattingPreferenceChanged(_ sender: NSSwitch) {
+        LocalSmartFormattingPreference.save(sender.state == .on)
+    }
+
     @objc private func accessibilityPermissionButtonPressed() {
         if permissionsCoordinator.accessibilityGranted {
             permissionsCoordinator.openAccessibilitySettings()
@@ -818,7 +862,8 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     }
 
     @objc private func manageVocabulary() {
-        onManageVocabulary()
+        guard let window else { return }
+        vocabularyWindowController.presentAsSheet(on: window)
     }
 
     @objc private func closePreferences() {
@@ -855,6 +900,8 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         syncClipboardRecoveryPreference()
         syncMediaPausePreference()
         syncMicrophoneChimePreference()
+        syncAutoAddCorrectionsPreference()
+        syncSmartFormattingPreference()
         permissionsCoordinator.refreshNow()
         enforceFixedWindowFrame()
         beginPreferencesActivationContext()
