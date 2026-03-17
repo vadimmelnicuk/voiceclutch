@@ -127,6 +127,7 @@ struct LocalLLMResponse: Sendable {
     }
 
     let transcript: String
+    let proposedTranscript: String  // LLM's raw output (may differ from transcript when rejected)
     let outcome: Outcome
     let durationMs: Int
     let skipReason: LocalLLMSkipReason?
@@ -139,6 +140,7 @@ extension LocalLLMResponse {
     static func skipped(transcript: String, reason: LocalLLMSkipReason) -> LocalLLMResponse {
         LocalLLMResponse(
             transcript: transcript,
+            proposedTranscript: transcript,
             outcome: .skipped,
             durationMs: 0,
             skipReason: reason,
@@ -243,17 +245,29 @@ struct LocalLLMSmartFormattingPromptBuilder {
 }
 
 struct LocalLLMOutputValidator {
+    let logger = AppLogger(category: "LocalLLMOutputValidator")
+
     func validate(candidate: String, for request: LocalLLMRequest) -> LocalLLMValidationDecision {
         let trimmedCandidate = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
         let deterministicTranscript = request.deterministicTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
-        let candidateTokens = normalizedWordTokens(from: trimmedCandidate)
-        let referenceTokens = normalizedWordTokens(from: deterministicTranscript)
+
+        // Normalize both strings for Unicode-aware comparison
+        let normalizedCandidate = normalizedForComparison(trimmedCandidate)
+        let normalizedReference = normalizedForComparison(deterministicTranscript)
+
+        let candidateTokens = normalizedWordTokens(from: normalizedCandidate)
+        let referenceTokens = normalizedWordTokens(from: normalizedReference)
+
+        logger.debug(
+            "Validation: candidateTokens=\(candidateTokens) referenceTokens=\(referenceTokens) equal=\(candidateTokens == referenceTokens)"
+        )
 
         guard !trimmedCandidate.isEmpty else {
             return .rejected(.emptyOutput)
         }
 
         if candidateTokens == referenceTokens {
+            logger.debug("Validation accepted: tokens equal")
             return .accepted(trimmedCandidate)
         }
 
@@ -325,7 +339,7 @@ struct LocalLLMOutputValidator {
 
         let distance = editDistance(candidateCollapsed, referenceCollapsed)
         let maxLength = max(candidateCollapsed.count, referenceCollapsed.count)
-        let allowedDistance = max(2, maxLength / 10)
+        let allowedDistance = max(3, maxLength / 6)
         return distance > allowedDistance
     }
 
@@ -493,7 +507,6 @@ actor LocalLLMCoordinator: LocalLLMServing {
         // Start preload in background without blocking
         Task.detached(priority: .utility) {
             let logger = AppLogger(category: "LocalLLMCoordinator")
-            let startTime = ContinuousClock.now
 
             #if canImport(MLXLLM) && canImport(MLXLMCommon) && canImport(Hub)
             do {
@@ -504,16 +517,12 @@ actor LocalLLMCoordinator: LocalLLMServing {
                 let modelDirectory = Self.defaultModelDirectory
                 logger.info("Loading LLM model from \(modelDirectory.path)")
                 let model = try await loadModel(directory: modelDirectory)
-                let loadDuration = startTime.duration(to: ContinuousClock.now).components.seconds
-                logger.info("LLM model loaded successfully in \(loadDuration)s")
+                logger.info("LLM model loaded successfully")
 
                 // Warmup: run a dummy inference to initialize computation graph
-                logger.info("Warming up LLM model...")
-                let warmupStart = ContinuousClock.now
                 let session = ChatSession(model)
                 _ = try await session.respond(to: "OK")
-                let warmupDuration = warmupStart.duration(to: ContinuousClock.now).components.seconds
-                logger.info("LLM model warmup completed in \(warmupDuration)s")
+                logger.info("LLM model warmup completed")
             } catch {
                 logger.debug("LLM model preload failed: \(error.localizedDescription)")
                 // Don't fail - model will load on-demand when needed
@@ -584,6 +593,7 @@ actor LocalLLMCoordinator: LocalLLMServing {
                     )
                     return makeResponse(
                         transcript: deterministicTranscript,
+                        proposedTranscript: candidateResponse,
                         outcome: .rejected,
                         startedAt: startedAt,
                         validationFailure: reason,
@@ -680,6 +690,7 @@ actor LocalLLMCoordinator: LocalLLMServing {
 
     private func makeResponse(
         transcript: String,
+        proposedTranscript: String? = nil,
         outcome: LocalLLMResponse.Outcome,
         startedAt: ContinuousClock.Instant,
         skipReason: LocalLLMSkipReason? = nil,
@@ -689,6 +700,7 @@ actor LocalLLMCoordinator: LocalLLMServing {
     ) -> LocalLLMResponse {
         LocalLLMResponse(
             transcript: transcript,
+            proposedTranscript: proposedTranscript ?? transcript,
             outcome: outcome,
             durationMs: elapsedMs(since: startedAt),
             skipReason: skipReason,
@@ -818,7 +830,8 @@ actor LocalLLMCoordinator: LocalLLMServing {
 private let normalizedTokenCharacterSet = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
 
 func normalizedWordTokens(from text: String) -> [String] {
-    text
+    // Normalize Unicode before processing to ensure consistent tokenization
+    normalizedForComparison(text)
         .split(whereSeparator: \.isWhitespace)
         .map { token in
             String(token)
@@ -826,4 +839,11 @@ func normalizedWordTokens(from text: String) -> [String] {
                 .lowercased()
         }
         .filter { !$0.isEmpty }
+}
+
+/// Normalizes a string for Unicode-aware comparison.
+/// Uses NFC (Canonical Composition) to ensure consistent byte representation
+/// of visually identical characters.
+func normalizedForComparison(_ text: String) -> String {
+    text.precomposedStringWithCanonicalMapping
 }

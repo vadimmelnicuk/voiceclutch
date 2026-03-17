@@ -7,6 +7,7 @@ final class TranscriptionSession {
         case notReady
     }
 
+    private let logger = AppLogger(category: "TranscriptionSession")
     let audioManager: AudioManager
     private var asrProcessor: ASRProcessor?
     private(set) var isReady = false
@@ -67,10 +68,10 @@ final class TranscriptionSession {
         let warmUpMs = Int((warmUpDuration * 1_000).rounded())
         let warmUpStatus = warmUpError == nil ? "success" : "failed"
 
-        print("⏱️ ASR prepare total=\(totalMs)ms preload=\(preloadMs)ms warmup=\(warmUpMs)ms status=\(warmUpStatus)")
+        logger.info("ASR prepare total=\(totalMs)ms preload=\(preloadMs)ms warmup=\(warmUpMs)ms status=\(warmUpStatus)")
 
         if let warmUpError {
-            print("⚠️ ASR warm-up failed: \(warmUpError)")
+            logger.warning("ASR warm-up failed: \(warmUpError)")
         }
         #endif
     }

@@ -154,11 +154,11 @@ terminate_stale_debug_processes() {
 }
 
 if [ "$BUILD_FOR_PRODUCTION" = true ]; then
-    echo "🔨 $(timestamp) Building VoiceClutch for PRODUCTION (Release configuration)..."
+    echo "$(timestamp) 🔨 Building VoiceClutch (Release)"
     XCODE_BUILD_DIR=".build/arm64-apple-macosx/release"
     CONFIG="Release"
 else
-    echo "🔨 $(timestamp) Building VoiceClutch (Debug configuration)..."
+    echo "$(timestamp) 🔨 Building VoiceClutch (Debug)"
     XCODE_BUILD_DIR=".build/arm64-apple-macosx/debug"
     CONFIG="Debug"
 fi
@@ -332,7 +332,7 @@ else
     echo "⚠️  Warning: MLX bundle not found - Metal shaders may not work"
 fi
 
-echo "✅ $(timestamp) Build successful!"
+echo "$(timestamp) ✅ Build successful!"
 echo ""
 echo "App bundle location: ${APP_BUNDLE}"
 

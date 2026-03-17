@@ -67,7 +67,7 @@ public actor ASRProcessor {
         do {
             let modelDir = ModelDownloadManager.asrModelDirectory
             let modelConfiguration = MLModelConfiguration()
-            modelConfiguration.computeUnits = .all
+            modelConfiguration.computeUnits = .cpuAndNeuralEngine
             modelConfiguration.allowLowPrecisionAccumulationOnGPU = true
 
             let manager = NemotronStreamingAsrManager(configuration: modelConfiguration)

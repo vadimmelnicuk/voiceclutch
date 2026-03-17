@@ -146,10 +146,21 @@ final class TranscriptPostProcessor {
             return edits
         }
 
+        // Clamp suffix to available characters to avoid invalid ranges
+        let originalRemaining = max(0, originalChars.count - maxCommonPrefix)
+        let modifiedRemaining = max(0, modifiedChars.count - maxCommonPrefix)
+        let clampedSuffix = min(maxCommonSuffix, originalRemaining, modifiedRemaining)
+
         let originalEditStart = originalChars.index(originalChars.startIndex, offsetBy: maxCommonPrefix)
-        let originalEditEnd = originalChars.index(originalChars.endIndex, offsetBy: -maxCommonSuffix)
+        let originalEditEnd = originalChars.index(originalChars.endIndex, offsetBy: -clampedSuffix)
         let modifiedEditStart = modifiedChars.index(modifiedChars.startIndex, offsetBy: maxCommonPrefix)
-        let modifiedEditEnd = modifiedChars.index(modifiedChars.endIndex, offsetBy: -maxCommonSuffix)
+        let modifiedEditEnd = modifiedChars.index(modifiedChars.endIndex, offsetBy: -clampedSuffix)
+
+        // Ensure ranges are valid (start < end)
+        guard originalEditStart < originalEditEnd,
+              modifiedEditStart < modifiedEditEnd else {
+            return edits
+        }
 
         let fromText = String(originalChars[originalEditStart..<originalEditEnd])
         let toText = String(modifiedChars[modifiedEditStart..<modifiedEditEnd])

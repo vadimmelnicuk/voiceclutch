@@ -215,6 +215,7 @@ actor EnhancedLocalLLMCoordinator: LocalLLMServing {
 
                 return makeResponse(
                     transcript: deterministic,
+                    proposedTranscript: structured.finalText,
                     outcome: .rejected,
                     startedAt: startedAt,
                     validationFailure: reason,
@@ -253,6 +254,7 @@ actor EnhancedLocalLLMCoordinator: LocalLLMServing {
         case .rejected(let reason):
             return makeResponse(
                 transcript: deterministic,
+                proposedTranscript: sanitized,
                 outcome: .rejected,
                 startedAt: startedAt,
                 validationFailure: reason,
@@ -275,9 +277,13 @@ actor EnhancedLocalLLMCoordinator: LocalLLMServing {
         let applier = TranscriptDiffApplier()
         let result = applier.applyEdits(safeEdits, to: original)
 
+        // Normalize both for Unicode-aware comparison
+        let normalizedResult = normalizedForComparison(result)
+        let normalizedOriginal = normalizedForComparison(original)
+
         // Verify the result is safe
-        let resultTokens = normalizedWordTokens(from: result)
-        let originalTokens = normalizedWordTokens(from: original)
+        let resultTokens = normalizedWordTokens(from: normalizedResult)
+        let originalTokens = normalizedWordTokens(from: normalizedOriginal)
 
         guard resultTokens == originalTokens else { return nil }
 
@@ -344,6 +350,7 @@ actor EnhancedLocalLLMCoordinator: LocalLLMServing {
 
     private func makeResponse(
         transcript: String,
+        proposedTranscript: String? = nil,
         outcome: LocalLLMResponse.Outcome,
         startedAt: ContinuousClock.Instant,
         skipReason: LocalLLMSkipReason? = nil,
@@ -353,6 +360,7 @@ actor EnhancedLocalLLMCoordinator: LocalLLMServing {
     ) -> LocalLLMResponse {
         LocalLLMResponse(
             transcript: transcript,
+            proposedTranscript: proposedTranscript ?? transcript,
             outcome: outcome,
             durationMs: elapsedMs(since: startedAt),
             skipReason: skipReason,
@@ -425,5 +433,14 @@ actor EnhancedLocalLLMCoordinator: LocalLLMServing {
         progressHandler: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws -> URL {
         try await LocalLLMCoordinator.ensureDefaultModelAvailable(progressHandler: progressHandler)
+    }
+
+    // MARK: - Helper Functions
+
+    /// Normalizes a string for Unicode-aware comparison.
+    /// Uses NFC (Canonical Composition) to ensure consistent byte representation
+    /// of visually identical characters.
+    private func normalizedForComparison(_ text: String) -> String {
+        text.precomposedStringWithCanonicalMapping
     }
 }

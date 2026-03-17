@@ -263,6 +263,14 @@ public final class DictationController: ObservableObject {
 
         let llmResponse = processedTranscript.llmResponse
         logger.info(localSmartFormattingLogLine(for: llmResponse))
+
+        // Always log smart formatting with proposed vs actual
+        logSmartFormattingStage(
+            llmResponse: llmResponse,
+            deterministic: processedTranscript.deterministicTranscript,
+            preLock: processedTranscript.preLockTranscript
+        )
+
         let smartFormattingChanged = logTranscriptChange(
             stage: "smartFormatting",
             before: processedTranscript.deterministicTranscript,
@@ -297,7 +305,11 @@ public final class DictationController: ObservableObject {
         }
 
         logger.debug(
-            "Transcript stage=\(stage) changed=true \(transcriptDiffSummary(before: before, after: after)) before=\"\(redactedTranscriptPreview(before))\" after=\"\(redactedTranscriptPreview(after))\""
+            """
+            Transcript stage=\(stage) changed=true \(transcriptDiffSummary(before: before, after: after))
+              before="\(redactedTranscriptPreview(before))"
+              after="\(redactedTranscriptPreview(after))"
+            """
         )
         return true
     }
@@ -320,6 +332,30 @@ public final class DictationController: ObservableObject {
             fields.append("acceptance=sameWordTokens")
         }
         return fields.joined(separator: " ")
+    }
+
+    private func logSmartFormattingStage(
+        llmResponse: LocalLLMResponse,
+        deterministic: String,
+        preLock: String
+    ) {
+        // Always log smart formatting stage, showing what LLM proposed vs what was actually used
+        let proposed = llmResponse.proposedTranscript
+        let used = preLock
+
+        // Only log if there's something interesting to show
+        guard !proposed.isEmpty else { return }
+
+        // If proposed differs from deterministic, show the comparison
+        if proposed != deterministic {
+            logger.debug(
+                """
+                Transcript stage=smartFormatting outcome=\(llmResponse.outcome.rawValue)
+                  proposed="\(redactedTranscriptPreview(proposed))"
+                  used="\(redactedTranscriptPreview(used))"
+                """
+            )
+        }
     }
 
     private func changedStagesSummary(
