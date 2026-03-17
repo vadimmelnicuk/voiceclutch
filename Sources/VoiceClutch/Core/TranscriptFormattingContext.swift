@@ -65,15 +65,36 @@ struct TranscriptFormattingContext: Sendable {
     let bundleIdentifier: String?
     let appName: String?
     let domain: TranscriptFormattingDomain
+    let requiresCodeSyntaxPostEdit: Bool
 
     init(
         bundleIdentifier: String? = nil,
         appName: String? = nil,
-        domain: TranscriptFormattingDomain? = nil
+        domain: TranscriptFormattingDomain? = nil,
+        requiresCodeSyntaxPostEdit: Bool? = nil
     ) {
         self.bundleIdentifier = bundleIdentifier
         self.appName = appName
         self.domain = domain ?? TranscriptFormattingDomain.infer(from: bundleIdentifier)
+        self.requiresCodeSyntaxPostEdit = requiresCodeSyntaxPostEdit ?? Self.requiresCodeSyntaxPostEdit(
+            from: self.domain,
+            bundleIdentifier: bundleIdentifier
+        )
+    }
+
+    static func requiresCodeSyntaxPostEdit(
+        from domain: TranscriptFormattingDomain,
+        bundleIdentifier: String?
+    ) -> Bool {
+        let lowercasedBundleIdentifier = bundleIdentifier?.lowercased() ?? ""
+        if lowercasedBundleIdentifier.contains("terminal")
+            || lowercasedBundleIdentifier.contains("iterm")
+            || lowercasedBundleIdentifier.contains("warp")
+            || lowercasedBundleIdentifier.contains("hyper") {
+            return true
+        }
+
+        return domain == .code || domain == .terminal
     }
 }
 

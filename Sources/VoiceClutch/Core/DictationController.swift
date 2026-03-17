@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 
@@ -16,6 +17,7 @@ public final class DictationController: ObservableObject {
     private var finalProcessingTask: Task<Void, Never>?
     private var latestPartialText: String = ""
     private var lastInjectedPartialText: String = ""
+    private var clipboardContextPreview: String?
     private var isAwaitingFinalResult = false
 
     public init(bootstrapper: TranscriptionBootstrapper = TranscriptionBootstrapper()) {
@@ -137,6 +139,7 @@ public final class DictationController: ObservableObject {
         state = .recording
 
         do {
+            captureClipboardContextPreviewIfNeeded()
             try bootstrapper.startRecording(onCaptureReady: onCaptureReady)
             TextInjector.beginStreamingSession()
         } catch {
@@ -205,6 +208,12 @@ public final class DictationController: ObservableObject {
         return bootstrapper.compactMemoryIfIdle()
     }
 
+    func handleMemoryPressure(level: LocalLLMMemoryPressureLevel) {
+        Task {
+            await transcriptPostProcessor.handleMemoryPressure(level: level)
+        }
+    }
+
     private func handleTranscriptionResult(_ text: String, isFinal: Bool) {
         if isFinal {
             guard isAwaitingFinalResult else { return }
@@ -249,35 +258,27 @@ public final class DictationController: ObservableObject {
         _ transcript: String,
         vocabularySnapshot: CustomVocabularySnapshot
     ) async {
-        let startedAt = ContinuousClock.now
-
         let processedTranscript = await transcriptPostProcessor.process(
             transcript: transcript,
-            vocabularySnapshot: vocabularySnapshot
+            vocabularySnapshot: vocabularySnapshot,
+            clipboardContextPreview: clipboardContextPreview
         )
-        let deterministicChanged = logTranscriptChange(
-            stage: "deterministic",
+        logTranscriptChange(
+            stage: "det",
             before: transcript,
             after: processedTranscript.deterministicTranscript
         )
 
         let llmResponse = processedTranscript.llmResponse
-        logger.info(localSmartFormattingLogLine(for: llmResponse))
-
-        // Always log smart formatting with proposed vs actual
-        logSmartFormattingStage(
-            llmResponse: llmResponse,
-            deterministic: processedTranscript.deterministicTranscript,
-            preLock: processedTranscript.preLockTranscript
+        logger.info(
+            localSmartFormattingLogLine(
+                for: llmResponse,
+                deterministic: processedTranscript.deterministicTranscript,
+                preLock: processedTranscript.preLockTranscript
+            )
         )
 
-        let smartFormattingChanged = logTranscriptChange(
-            stage: "smartFormatting",
-            before: processedTranscript.deterministicTranscript,
-            after: processedTranscript.preLockTranscript
-        )
-
-        let lockChanged = logTranscriptChange(
+        logTranscriptChange(
             stage: "lock",
             before: processedTranscript.preLockTranscript,
             after: processedTranscript.finalTranscript
@@ -285,14 +286,6 @@ public final class DictationController: ObservableObject {
 
         guard !Task.isCancelled else { return }
         finalProcessingTask = nil
-        let changedStages = changedStagesSummary(
-            deterministicChanged: deterministicChanged,
-            smartFormattingChanged: smartFormattingChanged,
-            lockChanged: lockChanged
-        )
-        logger.info(
-            "Final transcript processing completed duration=\(elapsedMs(since: startedAt))ms finalChanged=\(processedTranscript.finalTranscript != transcript) changedStages=\(changedStages)"
-        )
         TextInjector.commitStreamingFinalNormalized(processedTranscript.finalTranscript)
         resetPartialState()
         state = .idle
@@ -304,86 +297,93 @@ public final class DictationController: ObservableObject {
             return false
         }
 
-        logger.debug(
-            """
-            Transcript stage=\(stage) changed=true \(transcriptDiffSummary(before: before, after: after))
-              before="\(redactedTranscriptPreview(before))"
-              after="\(redactedTranscriptPreview(after))"
-            """
-        )
+        if shouldEmitTranscriptBodiesInLogs {
+            logger.debug(
+                """
+                tx.diff stage=\(stage) \(transcriptDiffSummary(before: before, after: after))
+                  before="\(redactedTranscriptPreview(before))"
+                  after="\(redactedTranscriptPreview(after))"
+                """
+            )
+        } else {
+            logger.debug(
+                "tx.diff stage=\(stage) \(transcriptDiffSummary(before: before, after: after))"
+            )
+        }
         return true
     }
 
-    private func localSmartFormattingLogLine(for response: LocalLLMResponse) -> String {
+    private func localSmartFormattingLogLine(
+        for response: LocalLLMResponse,
+        deterministic: String,
+        preLock: String
+    ) -> String {
+        let asrPrompt = redactedTranscriptPreview(deterministic)
+        let usedSource = response.wasOutputAccepted ? "llmFinalPass" : "asrPrompt"
         var fields = [
-            "Local smart-formatting outcome=\(response.outcome.rawValue)",
-            "duration=\(response.durationMs)ms"
+            "outcome=\(response.outcome.rawValue)",
+            "dur=\(response.durationMs)ms",
+            "used=\(usedSource)"
         ]
         if let skipReason = response.skipReason {
             fields.append("skip=\(skipReason.rawValue)")
         }
         if let failureReason = response.failureReason {
-            fields.append("failure=\(failureReason.rawValue)")
+            fields.append("fail=\(failureReason.rawValue)")
         }
         if let validationFailure = response.validationFailure {
-            fields.append("validation=\(validationFailure.rawValue)")
+            fields.append("val=\(validationFailure.rawValue)")
         }
         if response.wasOutputAccepted {
-            fields.append("acceptance=sameWordTokens")
+            fields.append("accept=validated")
         }
-        return fields.joined(separator: " ")
+        let proposed = response.proposedTranscript
+        guard !proposed.isEmpty else {
+            fields.append("llmFinalPass=empty")
+            return """
+            \(fields.joined(separator: " "))
+              asrPrompt="\(asrPrompt)"
+            """
+        }
+
+        let overlapRatio = proposalTokenOverlapRatio(proposed: proposed, deterministic: deterministic)
+        fields.append("overlap=\(String(format: "%.2f", overlapRatio))")
+        if deterministic != preLock {
+            fields.append(transcriptDiffSummary(before: deterministic, after: preLock))
+        }
+        let llmFinalPass = redactedTranscriptPreview(proposed)
+        return """
+        \(fields.joined(separator: " "))
+          asrPrompt="\(asrPrompt)"
+          llmFinalPass="\(llmFinalPass)"
+        """
     }
 
-    private func logSmartFormattingStage(
-        llmResponse: LocalLLMResponse,
-        deterministic: String,
-        preLock: String
-    ) {
-        // Always log smart formatting stage, showing what LLM proposed vs what was actually used
-        let proposed = llmResponse.proposedTranscript
-        let used = preLock
+    private func proposalTokenOverlapRatio(proposed: String, deterministic: String) -> Double {
+        let proposedTokens = Set(
+            proposed
+                .lowercased()
+                .split(whereSeparator: \.isWhitespace)
+                .map(String.init)
+        )
+        let deterministicTokens = Set(
+            deterministic
+                .lowercased()
+                .split(whereSeparator: \.isWhitespace)
+                .map(String.init)
+        )
 
-        // Only log if there's something interesting to show
-        guard !proposed.isEmpty else { return }
-
-        // If proposed differs from deterministic, show the comparison
-        if proposed != deterministic {
-            logger.debug(
-                """
-                Transcript stage=smartFormatting outcome=\(llmResponse.outcome.rawValue)
-                  proposed="\(redactedTranscriptPreview(proposed))"
-                  used="\(redactedTranscriptPreview(used))"
-                """
-            )
-        }
-    }
-
-    private func changedStagesSummary(
-        deterministicChanged: Bool,
-        smartFormattingChanged: Bool,
-        lockChanged: Bool
-    ) -> String {
-        let changedStages = [
-            deterministicChanged ? "deterministic" : nil,
-            smartFormattingChanged ? "smartFormatting" : nil,
-            lockChanged ? "lock" : nil
-        ].compactMap { $0 }
-        return changedStages.isEmpty ? "none" : changedStages.joined(separator: ",")
+        let unionCount = proposedTokens.union(deterministicTokens).count
+        guard unionCount > 0 else { return 1 }
+        let overlapCount = proposedTokens.intersection(deterministicTokens).count
+        return Double(overlapCount) / Double(unionCount)
     }
 
     private func redactedTranscriptPreview(_ text: String) -> String {
-        let collapsed = text
+        text
             .split(whereSeparator: \.isWhitespace)
             .map(String.init)
             .joined(separator: " ")
-        let maxPreviewLength = 160
-        guard collapsed.count > maxPreviewLength else { return collapsed }
-
-        let headLength = 96
-        let tailLength = 56
-        let head = String(collapsed.prefix(headLength))
-        let tail = String(collapsed.suffix(tailLength))
-        return "\(head)...\(tail)"
     }
 
     private func transcriptDiffSummary(before: String, after: String) -> String {
@@ -398,20 +398,57 @@ public final class DictationController: ObservableObject {
         }
 
         if firstDifferenceIndex == sharedLength, beforeCharacters.count == afterCharacters.count {
-            return "beforeLen=\(before.count) afterLen=\(after.count) firstDiffChar=none"
+            return "beforeLen=\(before.count) afterLen=\(after.count) firstDiff=none"
         }
 
-        return "beforeLen=\(before.count) afterLen=\(after.count) firstDiffChar=\(firstDifferenceIndex)"
+        return "beforeLen=\(before.count) afterLen=\(after.count) firstDiff=\(firstDifferenceIndex)"
     }
 
-    private func elapsedMs(since startedAt: ContinuousClock.Instant) -> Int {
-        let duration = startedAt.duration(to: ContinuousClock.now).components
-        return Int(duration.seconds * 1_000) + Int(duration.attoseconds / 1_000_000_000_000_000)
+    private var shouldEmitTranscriptBodiesInLogs: Bool {
+        #if DEBUG
+        true
+        #else
+        false
+        #endif
     }
 
     private func resetPartialState() {
         latestPartialText = ""
         lastInjectedPartialText = ""
+        clipboardContextPreview = nil
+    }
+
+    private func captureClipboardContextPreviewIfNeeded() {
+        guard isSmartFormattingEnabled(), ClipboardContextFormattingPreference.load() else {
+            clipboardContextPreview = nil
+            return
+        }
+
+        clipboardContextPreview = Self.makeClipboardContextPreview(
+            from: NSPasteboard.general.string(forType: .string)
+        )
+    }
+
+    static func makeClipboardContextPreview(from rawText: String?, maxLength: Int = 300) -> String? {
+        guard maxLength > 0 else { return nil }
+        guard let rawText else { return nil }
+
+        let normalized = rawText
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+        guard normalized.count > maxLength else { return normalized }
+
+        let truncationMarker = " [truncated]"
+        guard maxLength > truncationMarker.count else {
+            let end = normalized.index(normalized.startIndex, offsetBy: maxLength)
+            return String(normalized[..<end])
+        }
+
+        let prefixLength = maxLength - truncationMarker.count
+        let endIndex = normalized.index(normalized.startIndex, offsetBy: prefixLength)
+        return String(normalized[..<endIndex]) + truncationMarker
     }
 
     private func downloadLlmModelIfNeeded(_ shouldDownloadLLM: Bool) async throws -> Bool {

@@ -353,6 +353,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     fileprivate func handleMemoryPressureEvent(_ eventMask: DispatchSource.MemoryPressureEvent) {
         guard eventMask.contains(.warning) || eventMask.contains(.critical) else { return }
+        let level: LocalLLMMemoryPressureLevel = eventMask.contains(.critical) ? .critical : .warning
+        dictationController.handleMemoryPressure(level: level)
         _ = dictationController.compactMemoryIfIdle()
     }
 

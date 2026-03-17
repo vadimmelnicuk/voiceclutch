@@ -100,14 +100,6 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
             blendingMode: .withinWindow
         )
 
-        let introLabel = NSTextField(
-            wrappingLabelWithString: "Use `canonical` or `canonical: alias1, alias2` for terms, or use `original => replacement` / Original+Replacement fields for shortcuts. Learned corrections activate after 1 match."
-        )
-        introLabel.translatesAutoresizingMaskIntoConstraints = false
-        introLabel.font = NSFont.systemFont(ofSize: 12)
-        introLabel.textColor = .secondaryLabelColor
-        introLabel.maximumNumberOfLines = 4
-
         inputTextField.translatesAutoresizingMaskIntoConstraints = false
         inputTextField.placeholderString = "Term or original text"
         inputTextField.font = NSFont.systemFont(ofSize: 12)
@@ -181,7 +173,6 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
         doneButton.keyEquivalent = "\r"
 
         let stackView = NSStackView(views: [
-            introLabel,
             vocabularySection,
             statusLabel,
         ])

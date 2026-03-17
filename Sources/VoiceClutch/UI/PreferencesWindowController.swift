@@ -28,6 +28,7 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private let microphoneChimeSwitch = NSSwitch(frame: .zero)
     private let autoAddCorrectionsSwitch = NSSwitch(frame: .zero)
     private let smartFormattingSwitch = NSSwitch(frame: .zero)
+    private let clipboardContextFormattingSwitch = NSSwitch(frame: .zero)
     private let accessibilityPermissionIndicator = NSView()
     private let accessibilityPermissionButton = NSButton(title: "Grant", target: nil, action: nil)
     private let microphonePermissionIndicator = NSView()
@@ -154,7 +155,7 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
 
         let autoAddCorrectionsRow = makeSettingsRow(
             title: "Auto corrections",
-            detail: "Learn proper nouns and acronyms from accepted transcript edits.",
+            detail: "Learn terms and acronyms from transcript edits.",
             control: autoAddCorrectionsSwitch
         )
 
@@ -165,6 +166,18 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
             title: "LLM-powered formatting",
             detail: "Run an optional LLM pass on the final transcript.",
             control: smartFormattingSwitch
+        )
+
+        configureToggle(
+            clipboardContextFormattingSwitch,
+            action: #selector(clipboardContextFormattingPreferenceChanged(_:))
+        )
+        syncClipboardContextFormattingPreference()
+
+        let clipboardContextFormattingRow = makeSettingsRow(
+            title: "Clipboard context",
+            detail: "Use clipboard contents to guide LLM final pass.",
+            control: clipboardContextFormattingSwitch
         )
 
         let vocabularyButton = NSButton(title: "Manage", target: self, action: #selector(manageVocabulary))
@@ -229,6 +242,7 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         let correctionsGroup = makeSettingsGroup(rows: [
             smartFormattingRow,
             autoAddCorrectionsRow,
+            clipboardContextFormattingRow,
             vocabularyRow
         ])
         let correctionsSection = makeSettingsSection(
@@ -574,6 +588,10 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         smartFormattingSwitch.state = LocalSmartFormattingPreference.load() ? .on : .off
     }
 
+    private func syncClipboardContextFormattingPreference() {
+        clipboardContextFormattingSwitch.state = ClipboardContextFormattingPreference.load() ? .on : .off
+    }
+
     private func bindPermissionUpdates() {
         permissionsCoordinator.$snapshot
             .receive(on: DispatchQueue.main)
@@ -830,6 +848,10 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         LocalSmartFormattingPreference.save(sender.state == .on)
     }
 
+    @objc private func clipboardContextFormattingPreferenceChanged(_ sender: NSSwitch) {
+        ClipboardContextFormattingPreference.save(sender.state == .on)
+    }
+
     @objc private func accessibilityPermissionButtonPressed() {
         if permissionsCoordinator.accessibilityGranted {
             permissionsCoordinator.openAccessibilitySettings()
@@ -902,6 +924,7 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         syncMicrophoneChimePreference()
         syncAutoAddCorrectionsPreference()
         syncSmartFormattingPreference()
+        syncClipboardContextFormattingPreference()
         permissionsCoordinator.refreshNow()
         enforceFixedWindowFrame()
         beginPreferencesActivationContext()

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "scripts": {
     "build:debug": "./Scripts/build.sh",
-    "build:production": "./Scripts/build.sh --production"
+    "build:production": "./Scripts/build.sh --production",
+    "test": "./Scripts/test.sh"
   }
 }

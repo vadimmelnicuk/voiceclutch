@@ -29,6 +29,25 @@ struct TranscriptEdit: Codable, Sendable, Equatable {
     let to: String
     let reason: TranscriptEditType
 
+    init(from: String, to: String, reason: TranscriptEditType) {
+        self.from = from
+        self.to = to
+        self.reason = reason
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case from
+        case to
+        case reason
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        from = try container.decode(String.self, forKey: .from)
+        to = try container.decode(String.self, forKey: .to)
+        reason = try container.decodeIfPresent(TranscriptEditType.self, forKey: .reason) ?? .unknown
+    }
+
     var isPunctuationOnly: Bool {
         guard from.count == to.count else { return false }
         let fromLetters = from.filter { $0.isLetter || $0.isNumber }
@@ -41,6 +60,22 @@ struct TranscriptEdit: Codable, Sendable, Equatable {
 struct StructuredFormattingResponse: Codable, Sendable {
     let finalText: String
     let edits: [TranscriptEdit]
+
+    private enum CodingKeys: String, CodingKey {
+        case finalText
+        case edits
+    }
+
+    init(finalText: String, edits: [TranscriptEdit] = []) {
+        self.finalText = finalText
+        self.edits = edits
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        finalText = try container.decode(String.self, forKey: .finalText)
+        edits = try container.decodeIfPresent([TranscriptEdit].self, forKey: .edits) ?? []
+    }
 
     /// True if all edits are punctuation/capitalization/spacing only (no wording changes)
     var isFormattingOnly: Bool {
@@ -203,6 +238,88 @@ enum SentenceCaseStyle: String, Sendable {
     case asSpoken = "as_spoken"
 }
 
+enum ListFormattingHint: String, Sendable {
+    case none
+    case bulleted
+    case numbered
+}
+
+enum ListFormattingIntentDetector {
+    private static let optionNumberRegex = makeRegex(
+        pattern: #"\boption\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b"#
+    )
+    private static let ordinalRegex = makeRegex(
+        pattern: #"\b(first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\b"#
+    )
+    private static let spokenNumberingRegex = makeRegex(
+        pattern: #"(?:(?:^|[\s,;:])\d+[\).\:-])"#
+    )
+    private static let bulletCueRegex = makeRegex(
+        pattern: #"\b(bullet point|bullet points|bullet list)\b"#
+    )
+    private static let delimiterRegex = makeRegex(
+        pattern: #"[,;]|\b(and|or)\b"#
+    )
+
+    static func hint(
+        for transcript: String,
+        formattingContext: TranscriptFormattingContext
+    ) -> ListFormattingHint {
+        guard shouldDetectListIntent(in: formattingContext) else {
+            return .none
+        }
+
+        let normalized = normalizedForComparison(transcript)
+            .lowercased()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else {
+            return .none
+        }
+
+        let numberingSignals = countMatches(optionNumberRegex, in: normalized)
+            + countMatches(ordinalRegex, in: normalized)
+            + countMatches(spokenNumberingRegex, in: normalized)
+        if numberingSignals >= 2 {
+            return .numbered
+        }
+
+        let hasBulletCue = hasMatch(bulletCueRegex, in: normalized)
+        let estimatedItemCount = countMatches(delimiterRegex, in: normalized) + 1
+        if hasBulletCue && estimatedItemCount >= 2 {
+            return .bulleted
+        }
+
+        return .none
+    }
+
+    private static func shouldDetectListIntent(in context: TranscriptFormattingContext) -> Bool {
+        guard !context.requiresCodeSyntaxPostEdit else {
+            return false
+        }
+
+        switch context.domain {
+        case .code, .terminal:
+            return false
+        case .general, .messaging, .documents, .email:
+            return true
+        }
+    }
+
+    private static func countMatches(_ regex: NSRegularExpression?, in text: String) -> Int {
+        guard let regex else { return 0 }
+        let range = NSRange(text.startIndex..., in: text)
+        return regex.numberOfMatches(in: text, options: [], range: range)
+    }
+
+    private static func hasMatch(_ regex: NSRegularExpression?, in text: String) -> Bool {
+        countMatches(regex, in: text) > 0
+    }
+
+    private static func makeRegex(pattern: String) -> NSRegularExpression? {
+        try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
+    }
+}
+
 struct FormattingStylePreferences: Sendable {
     let emDashStyle: EmDashStyle
     let oxfordComma: OxfordCommaStyle
@@ -296,6 +413,7 @@ struct ExtendedFormattingContext: Sendable {
     let recentCorrections: [LearnedCorrection]
     let stylePreferences: FormattingStylePreferences
     let protectedSpans: [ProtectedSpan]
+    let clipboardPreview: String?
 
     var domain: TranscriptFormattingDomain {
         formattingContext.domain
@@ -309,12 +427,17 @@ struct ExtendedFormattingContext: Sendable {
         formattingContext.bundleIdentifier
     }
 
+    var requiresCodeSyntaxPostEdit: Bool {
+        formattingContext.requiresCodeSyntaxPostEdit
+    }
+
     static let empty = ExtendedFormattingContext(
         formattingContext: TranscriptFormattingContext(),
         previousSentences: [],
         recentCorrections: [],
         stylePreferences: .default,
-        protectedSpans: []
+        protectedSpans: [],
+        clipboardPreview: nil
     )
 }
 

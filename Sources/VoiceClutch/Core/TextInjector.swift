@@ -255,8 +255,11 @@ public class TextInjector {
         }
 
         let expectedChangeCount: Int?
+        var deletedCharacterCount = 0
+        var didQueuePaste = false
         if normalizedFinalText.isEmpty {
             if !session.lastInjectedText.isEmpty {
+                deletedCharacterCount = session.lastInjectedText.count
                 deleteRecentlyInsertedText(characterCount: session.lastInjectedText.count)
             }
             expectedChangeCount = session.lastInjectedChangeCount
@@ -273,6 +276,7 @@ public class TextInjector {
                 return
             }
             simulatePaste()
+            didQueuePaste = true
             expectedChangeCount = changeCount
         } else {
             guard let changeCount = writeToPasteboard(normalizedFinalText) else {
@@ -285,16 +289,24 @@ public class TextInjector {
             }
 
             if !session.lastInjectedText.isEmpty {
+                deletedCharacterCount = session.lastInjectedText.count
                 deleteRecentlyInsertedText(characterCount: session.lastInjectedText.count)
             }
             simulatePaste()
+            didQueuePaste = true
             expectedChangeCount = changeCount
         }
+
+        let additionalRecoveryDelay = clipboardRecoveryAdditionalDelay(
+            deletedCharacterCount: deletedCharacterCount,
+            didQueuePaste: didQueuePaste
+        )
 
         restoreClipboardIfNeeded(
             originalClipboard: session.originalClipboard,
             shouldRecoverClipboard: session.shouldRecoverClipboard,
-            expectedChangeCount: expectedChangeCount
+            expectedChangeCount: expectedChangeCount,
+            additionalDelay: additionalRecoveryDelay
         )
 
         if monitoringText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -639,13 +651,14 @@ public class TextInjector {
     private static func restoreClipboardIfNeeded(
         originalClipboard: ClipboardSnapshot?,
         shouldRecoverClipboard: Bool,
-        expectedChangeCount: Int?
+        expectedChangeCount: Int?,
+        additionalDelay: TimeInterval = 0
     ) {
         guard shouldRecoverClipboard else { return }
 
         let pasteboard = NSPasteboard.general
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + clipboardRecoveryDelay) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + clipboardRecoveryDelay + additionalDelay) {
             guard let originalClipboard else { return }
             guard !isStreamingSessionActive() else { return }
 
@@ -656,6 +669,21 @@ public class TextInjector {
 
             originalClipboard.restore(to: pasteboard)
         }
+    }
+
+    private static func clipboardRecoveryAdditionalDelay(
+        deletedCharacterCount: Int,
+        didQueuePaste: Bool
+    ) -> TimeInterval {
+        guard didQueuePaste, deletedCharacterCount > 0 else { return 0 }
+
+        // Backspace is posted as key-down/key-up pairs, then Cmd+V is posted.
+        // Large queued rewrites can delay paste dispatch; budget extra restore
+        // time so recovery does not race ahead of the queued paste operation.
+        let estimatedEventCount = (deletedCharacterCount * 2) + 4
+        let perEventBudget: TimeInterval = 0.0015
+        let delay = Double(estimatedEventCount) * perEventBudget
+        return min(3.0, delay)
     }
 
     private static func isStreamingSessionActive() -> Bool {

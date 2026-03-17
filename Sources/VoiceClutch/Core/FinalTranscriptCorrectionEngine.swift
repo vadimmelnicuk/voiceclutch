@@ -30,12 +30,16 @@ struct FinalTranscriptCorrectionEngine {
         let score: Double
     }
 
-    func correctedTranscript(from text: String, vocabulary: CustomVocabularySnapshot) -> String {
+    func correctedTranscript(
+        from text: String,
+        vocabulary: CustomVocabularySnapshot
+    ) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
 
         let rewritten = CustomVocabularyManager.applyRewriteRules(to: trimmed, snapshot: vocabulary)
-        return applyFuzzyCorrections(to: rewritten, vocabulary: vocabulary)
+        let corrected = applyFuzzyCorrections(to: rewritten, vocabulary: vocabulary)
+        return corrected
     }
 
     private func applyFuzzyCorrections(to text: String, vocabulary: CustomVocabularySnapshot) -> String {
