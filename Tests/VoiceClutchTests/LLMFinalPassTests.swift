@@ -71,14 +71,12 @@ final class ListFormattingPromptBuilderTests: XCTestCase {
 
         let prompt = builder.buildPrompt(for: request, extendedContext: .empty)
 
-        XCTAssertTrue(prompt.contains("Improve dictated text for clarity and intended meaning."))
-        XCTAssertTrue(prompt.contains("Preserve core intent and factual content."))
-        XCTAssertTrue(prompt.contains("You may rephrase when needed to fix likely ASR wording errors and improve clarity while preserving intent."))
-        XCTAssertTrue(prompt.contains("Remove obvious filler words when they reduce clarity."))
+        XCTAssertTrue(prompt.contains("Preserve the dictated transcript's wording and meaning."))
+        XCTAssertTrue(prompt.contains("Do not paraphrase, summarize, add/remove facts, or change speaker perspective, tense, or claims."))
+        XCTAssertTrue(prompt.contains("Allow local wording fixes for obvious high-confidence ASR mistakes"))
+        XCTAssertTrue(prompt.contains("You may remove accidental immediate duplicate filler words."))
         XCTAssertTrue(prompt.contains("Do not copy instruction text into final_text."))
-        XCTAssertTrue(prompt.contains("Return one valid JSON object with exactly one key:"))
-        XCTAssertTrue(prompt.contains("{\"final_text\":\"...\"}"))
-        XCTAssertTrue(prompt.contains("No markdown. No extra keys. No extra text."))
+        XCTAssertTrue(prompt.contains("Output exactly one JSON object: {\"final_text\":\"...\"}. No markdown, no extra keys, no extra text."))
         XCTAssertTrue(prompt.contains("Input JSON:"))
         XCTAssertTrue(prompt.contains("\"transcript\":"))
         XCTAssertTrue(prompt.contains(#""transcript":"use bullet points apples, bananas, oranges""#))
@@ -690,17 +688,14 @@ final class LocalLLMOutputValidatorTests: XCTestCase {
         assertAccepted(result, equals: "send the status update confirm attendance and then close the call")
     }
 
-    func testPlainValidation_acceptsLargeNonCodeRewordingWhenMeaningLikelyPreserved() {
+    func testPlainValidation_rejectsLargeNonCodeRewordingEvenWhenSemanticallyRelated() {
         let original = "sing as mouse you're just completely reliant on your arrow"
         let result = validate(
             candidate: "Using a mouse, you're almost entirely reliant on the arrow pointer.",
             against: original
         )
 
-        assertAccepted(
-            result,
-            equals: "Using a mouse, you're almost entirely reliant on the arrow pointer."
-        )
+        assertRejected(result, as: .wordingChanged)
     }
 
     func testPlainValidation_rejectsPromptBoundaryMarkerLeakage() {
@@ -782,13 +777,13 @@ final class LocalLLMOutputValidatorTests: XCTestCase {
     func testPlainValidation_acceptsSmallWordingShiftWithHighTokenOverlap() {
         let original = "please send the status update and share the follow-up notes from the standup"
         let result = validate(
-            candidate: "please send final status update and share the follow up notes from the standup",
+            candidate: "please send the status update and share the follow up notes from standup",
             against: original
         )
 
         assertAccepted(
             result,
-            equals: "please send final status update and share the follow up notes from the standup"
+            equals: "please send the status update and share the follow up notes from standup"
         )
     }
 
@@ -1195,12 +1190,11 @@ final class ClipboardContextPromptBuilderTests: XCTestCase {
             extendedContext: makeExtendedContext(clipboardPreview: preview)
         )
 
-        XCTAssertTrue(prompt.contains("Improve dictated text for clarity and intended meaning."))
-        XCTAssertTrue(prompt.contains("Preserve core intent and factual content."))
-        XCTAssertTrue(prompt.contains("You may rephrase when needed to fix likely ASR wording errors and improve clarity while preserving intent."))
+        XCTAssertTrue(prompt.contains("Preserve the dictated transcript's wording and meaning."))
+        XCTAssertTrue(prompt.contains("Do not paraphrase, summarize, add/remove facts, or change speaker perspective, tense, or claims."))
+        XCTAssertTrue(prompt.contains("Allow local wording fixes for obvious high-confidence ASR mistakes"))
         XCTAssertTrue(prompt.contains("Do not copy instruction text into final_text."))
-        XCTAssertTrue(prompt.contains("Return one valid JSON object with exactly one key:"))
-        XCTAssertTrue(prompt.contains("{\"final_text\":\"...\"}"))
+        XCTAssertTrue(prompt.contains("Output exactly one JSON object: {\"final_text\":\"...\"}. No markdown, no extra keys, no extra text."))
         XCTAssertTrue(prompt.contains("Input JSON:"))
         XCTAssertTrue(prompt.contains("\"transcript\":"))
         XCTAssertTrue(prompt.contains(#""transcript":"please tidy this up""#))
@@ -1240,8 +1234,8 @@ final class ClipboardContextPromptBuilderTests: XCTestCase {
         )
         let prompt = builder.buildPrompt(for: request, extendedContext: context)
 
-        XCTAssertTrue(prompt.contains("Fix dictated code minimally."))
-        XCTAssertTrue(prompt.contains("Return one valid JSON object with exactly one key:"))
+        XCTAssertTrue(prompt.contains("Minimize edits to dictated code and preserve meaning."))
+        XCTAssertTrue(prompt.contains("Output exactly one JSON object: {\"final_text\":\"...\"}. No markdown, no extra keys, no extra text."))
         XCTAssertTrue(prompt.contains("Fix only obvious punctuation, spacing, brackets, quotes, operators, and spoken symbols."))
     }
 

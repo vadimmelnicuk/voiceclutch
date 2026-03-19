@@ -20,6 +20,8 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private let onInteractionModeChanged: @MainActor (ListeningInteractionMode) -> Void
     private let permissionsCoordinator: PermissionsCoordinator
     private let vocabularyWindowController = VocabularyWindowController()
+    private weak var vocabularyButton: NSButton?
+    private var vocabularyDidChangeObserver: NSObjectProtocol?
     private let holdToTalkRadioButton = NSButton(radioButtonWithTitle: "Hold-to-talk", target: nil, action: nil)
     private let listenToggleRadioButton = NSButton(radioButtonWithTitle: "Press-to-talk", target: nil, action: nil)
     private let shortcutPopup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -72,6 +74,7 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         window.delegate = self
         setupContent()
         bindPermissionUpdates()
+        bindVocabularyUpdates()
         enforceFixedWindowFrame()
     }
     
@@ -147,7 +150,8 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         let microphoneChimeRow = makeSettingsRow(
             title: "Chimes",
             detail: "Play microphone chimes when listening starts and stops.",
-            control: microphoneChimeSwitch
+            control: microphoneChimeSwitch,
+            showsSeparator: false
         )
 
         configureToggle(autoAddCorrectionsSwitch, action: #selector(autoAddCorrectionsPreferenceChanged(_:)))
@@ -182,6 +186,7 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
 
         let vocabularyButton = NSButton(title: "Manage", target: self, action: #selector(manageVocabulary))
         vocabularyButton.bezelStyle = .rounded
+        self.vocabularyButton = vocabularyButton
         let vocabularyRow = makeSettingsRow(
             title: "Vocabulary",
             detail: "Edit manual replacements and manage learned auto corrections.",
@@ -603,6 +608,30 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         applyPermissionSnapshot(permissionsCoordinator.snapshot)
     }
 
+    private func bindVocabularyUpdates() {
+        vocabularyDidChangeObserver = NotificationCenter.default.addObserver(
+            forName: .customVocabularyDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.updateVocabularyBadge()
+            }
+        }
+        updateVocabularyBadge()
+    }
+
+    private func updateVocabularyBadge() {
+        guard let button = vocabularyButton else { return }
+        let snapshot = CustomVocabularyManager.shared.snapshot()
+        let pendingCount = snapshot.pendingSuggestions.count
+        if pendingCount > 0 {
+            button.title = "Manage (\(pendingCount))"
+        } else {
+            button.title = "Manage"
+        }
+    }
+
     private func applyPermissionSnapshot(_ snapshot: PermissionSnapshot) {
         accessibilityPermissionIndicator.layer?.backgroundColor = snapshot.accessibilityGranted
             ? NSColor.systemGreen.cgColor
@@ -885,6 +914,8 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func manageVocabulary() {
         guard let window else { return }
+        // Clear badge when opening vocabulary window
+        vocabularyButton?.title = "Manage"
         vocabularyWindowController.presentAsSheet(on: window)
     }
 
@@ -926,6 +957,7 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         syncSmartFormattingPreference()
         syncClipboardContextFormattingPreference()
         permissionsCoordinator.refreshNow()
+        updateVocabularyBadge()
         enforceFixedWindowFrame()
         beginPreferencesActivationContext()
         guard let window else { return }

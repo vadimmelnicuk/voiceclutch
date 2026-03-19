@@ -65,6 +65,7 @@ final class MLXChatSessionAdapter: @unchecked Sendable, LocalLLMGeneratingSessio
 
 enum LocalLLMCapability: String, Sendable {
     case smartFormatting
+    case vocabularySuggestions
     case commandTransform
     case snippetExpansion
     case contextAssist
@@ -270,6 +271,164 @@ struct LocalLLMOutputValidator {
     }
 }
 
+struct LLMUserEditSignal: Sendable {
+    let source: String
+    let target: String
+}
+
+struct LocalLLMVocabularySuggestionRequest: Sendable {
+    let transcript: String
+    let vocabulary: CustomVocabularySnapshot
+    let userEditSignal: LLMUserEditSignal?
+    let maxSuggestions: Int
+    let timeoutNanoseconds: UInt64?
+
+    init(
+        transcript: String,
+        vocabulary: CustomVocabularySnapshot,
+        userEditSignal: LLMUserEditSignal? = nil,
+        maxSuggestions: Int = 4,
+        timeoutNanoseconds: UInt64? = nil
+    ) {
+        self.transcript = transcript
+        self.vocabulary = vocabulary
+        self.userEditSignal = userEditSignal
+        self.maxSuggestions = maxSuggestions
+        self.timeoutNanoseconds = timeoutNanoseconds
+    }
+}
+
+struct LLMVocabularySuggestionPayload: Codable {
+    let source: String
+    let target: String
+    let evidence: String?
+    let confidence: Double?
+    let targetTermStatus: String?
+}
+
+struct LLMVocabularySuggestionEnvelope: Codable {
+    let suggestions: [LLMVocabularySuggestionPayload]
+}
+
+struct LLMVocabularySuggestionPromptBuilder {
+    private static let jsonEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        return encoder
+    }()
+
+    func buildPrompt(for request: LocalLLMVocabularySuggestionRequest) -> String {
+        let transcriptLiteral = jsonStringLiteral(request.transcript)
+        let maxSuggestions = max(1, min(request.maxSuggestions, 6))
+        let glossary = glossaryJSON(from: request.vocabulary)
+
+        var sections: [String] = [
+            """
+            Suggest vocabulary/autocorrection mappings for future learning only.
+            Do not rewrite the transcript. Return only JSON.
+            Output exactly: {"suggestions":[{"source":"...","target":"...","evidence":"transcript_only|user_edit|mixed","confidence":0.00,"target_term_status":"existing|new"}]}
+            Confidence must be between 0 and 1.
+            Suggest at most \(maxSuggestions) mappings.
+            Use short phrase-level mappings only.
+            Prefer canonical spellings, brands, acronyms, and technical terms.
+            Skip uncertain suggestions.
+            """,
+            "Input JSON:",
+            #"{"transcript":\#(transcriptLiteral),"max_suggestions":\#(maxSuggestions),"known_terms":\#(glossary)}"#
+        ]
+
+        if let signal = request.userEditSignal {
+            sections.append(
+                #"{"user_edit_signal":{"source":\#(jsonStringLiteral(signal.source)),"target":\#(jsonStringLiteral(signal.target))}}"#
+            )
+        }
+
+        return sections.joined(separator: "\n")
+    }
+
+    private func glossaryJSON(from vocabulary: CustomVocabularySnapshot) -> String {
+        let glossary = CustomVocabularyManager
+            .glossaryEntries(from: vocabulary, limit: 36)
+            .map(\.preferred)
+        guard let data = try? Self.jsonEncoder.encode(glossary),
+              let string = String(data: data, encoding: .utf8) else {
+            return "[]"
+        }
+        return string
+    }
+
+    private func jsonStringLiteral(_ value: String) -> String {
+        guard let data = try? Self.jsonEncoder.encode(value),
+              let encoded = String(data: data, encoding: .utf8) else {
+            return "\"\""
+        }
+        return encoded
+    }
+}
+
+struct LLMVocabularySuggestionParser {
+    private static let jsonDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return decoder
+    }()
+
+    func parse(_ raw: String) -> [LLMVocabularySuggestionPayload] {
+        let sanitized = sanitize(raw)
+        guard !sanitized.isEmpty else {
+            return []
+        }
+
+        if let data = sanitized.data(using: .utf8),
+           let envelope = try? Self.jsonDecoder.decode(LLMVocabularySuggestionEnvelope.self, from: data) {
+            return envelope.suggestions
+        }
+
+        if let object = extractJsonObject(from: sanitized),
+           let data = object.data(using: .utf8),
+           let envelope = try? Self.jsonDecoder.decode(LLMVocabularySuggestionEnvelope.self, from: data) {
+            return envelope.suggestions
+        }
+
+        if let arrayText = extractJsonArray(from: sanitized),
+           let data = arrayText.data(using: .utf8),
+           let array = try? Self.jsonDecoder.decode([LLMVocabularySuggestionPayload].self, from: data) {
+            return array
+        }
+
+        return []
+    }
+
+    private func sanitize(_ text: String) -> String {
+        var value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.hasPrefix("```json") {
+            value = String(value.dropFirst(7))
+        } else if value.hasPrefix("```") {
+            value = String(value.dropFirst(3))
+        }
+        if value.hasSuffix("```") {
+            value = String(value.dropLast(3))
+        }
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func extractJsonObject(from text: String) -> String? {
+        guard let first = text.firstIndex(of: "{"),
+              let last = text.lastIndex(of: "}") else {
+            return nil
+        }
+        let candidate = String(text[first...last])
+        return candidate.contains("\"suggestions\"") ? candidate : nil
+    }
+
+    private func extractJsonArray(from text: String) -> String? {
+        guard let first = text.firstIndex(of: "["),
+              let last = text.lastIndex(of: "]") else {
+            return nil
+        }
+        return String(text[first...last])
+    }
+}
+
 actor LocalLLMCoordinator: LocalLLMServing {
     typealias SessionLoader = LLMRuntime.SessionLoader
 
@@ -306,6 +465,8 @@ actor LocalLLMCoordinator: LocalLLMServing {
     private let runtime: LLMRuntime
     private let constrainedPromptBuilder: ConstrainedFormattingPromptBuilder
     private let structuredResponseParser: StructuredResponseParser
+    private let vocabularySuggestionPromptBuilder: LLMVocabularySuggestionPromptBuilder
+    private let vocabularySuggestionParser: LLMVocabularySuggestionParser
     private let validationEngine: TranscriptValidationEngine
 
     private let correctionHistory = CorrectionHistoryStore()
@@ -320,6 +481,8 @@ actor LocalLLMCoordinator: LocalLLMServing {
         runtime: LLMRuntime? = nil,
         constrainedPromptBuilder: ConstrainedFormattingPromptBuilder = ConstrainedFormattingPromptBuilder(),
         structuredResponseParser: StructuredResponseParser = StructuredResponseParser(),
+        vocabularySuggestionPromptBuilder: LLMVocabularySuggestionPromptBuilder = LLMVocabularySuggestionPromptBuilder(),
+        vocabularySuggestionParser: LLMVocabularySuggestionParser = LLMVocabularySuggestionParser(),
         validationEngine: TranscriptValidationEngine = TranscriptValidationEngine()
     ) {
         self.preferenceLoader = preferenceLoader
@@ -332,6 +495,8 @@ actor LocalLLMCoordinator: LocalLLMServing {
         }
         self.constrainedPromptBuilder = constrainedPromptBuilder
         self.structuredResponseParser = structuredResponseParser
+        self.vocabularySuggestionPromptBuilder = vocabularySuggestionPromptBuilder
+        self.vocabularySuggestionParser = vocabularySuggestionParser
         self.validationEngine = validationEngine
     }
 
@@ -423,6 +588,69 @@ actor LocalLLMCoordinator: LocalLLMServing {
 
         observe(response)
         return response
+    }
+
+    func generateVocabularySuggestions(
+        _ request: LocalLLMVocabularySuggestionRequest
+    ) async -> [LLMVocabularySuggestion] {
+        guard preferenceLoader() else {
+            return []
+        }
+
+        let transcript = request.transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !transcript.isEmpty else {
+            return []
+        }
+
+        let prompt = vocabularySuggestionPromptBuilder.buildPrompt(for: request)
+        let timeoutNanoseconds = request.timeoutNanoseconds ?? 1_200_000_000
+        let generation = await runtime.generate(
+            prompt: prompt,
+            timeoutNanoseconds: timeoutNanoseconds
+        )
+
+        let payloads: [LLMVocabularySuggestionPayload]
+        switch generation {
+        case .success(let raw):
+            payloads = vocabularySuggestionParser.parse(sanitize(raw))
+        case .timedOut:
+            logger.debug("LLM vocabulary suggestion generation timed out")
+            return []
+        case .failed(let error):
+            logger.debug("LLM vocabulary suggestion generation failed: \(error.localizedDescription)")
+            return []
+        }
+
+        guard !payloads.isEmpty else {
+            return []
+        }
+
+        var dedupedByPair: [String: LLMVocabularySuggestion] = [:]
+        for payload in payloads.prefix(max(1, min(request.maxSuggestions, 6))) {
+            guard let validated = validatedSuggestion(payload, request: request) else {
+                continue
+            }
+
+            let dedupeKey = validated.normalizedSource + "->" + validated.normalizedTarget
+            if let existing = dedupedByPair[dedupeKey] {
+                var merged = existing
+                merged.confidence = max(existing.confidence, validated.confidence)
+                merged.evidence = mergedEvidence(existing.evidence, validated.evidence)
+                merged.targetTermStatus = validated.targetTermStatus
+                merged.updatedAt = Date()
+                dedupedByPair[dedupeKey] = merged
+            } else {
+                dedupedByPair[dedupeKey] = validated
+            }
+        }
+
+        return dedupedByPair.values
+            .sorted { lhs, rhs in
+                if lhs.confidence != rhs.confidence {
+                    return lhs.confidence > rhs.confidence
+                }
+                return lhs.updatedAt > rhs.updatedAt
+            }
     }
 
     func recordCorrection(source: String, target: String) async {
@@ -597,6 +825,232 @@ actor LocalLLMCoordinator: LocalLLMServing {
         return !indicators.contains { indicator in
             normalizedReference.contains(indicator)
         }
+    }
+
+    private func validatedSuggestion(
+        _ payload: LLMVocabularySuggestionPayload,
+        request: LocalLLMVocabularySuggestionRequest
+    ) -> LLMVocabularySuggestion? {
+        let source = CustomVocabularyManager.sanitizedTerm(payload.source)
+        let target = CustomVocabularyManager.sanitizedTerm(payload.target)
+        let normalizedSource = CustomVocabularyManager.normalizedLookupKey(source)
+        let normalizedTarget = CustomVocabularyManager.normalizedLookupKey(target)
+        guard
+            !source.isEmpty,
+            !target.isEmpty,
+            !normalizedSource.isEmpty,
+            !normalizedTarget.isEmpty,
+            normalizedSource != normalizedTarget
+        else {
+            return nil
+        }
+
+        let evidence = normalizedEvidence(
+            payload.evidence,
+            hasUserEditSignal: request.userEditSignal != nil
+        )
+        let confidence = min(1, max(0, payload.confidence ?? defaultConfidence(for: evidence)))
+        guard confidence >= minimumConfidence(for: evidence) else {
+            return nil
+        }
+        guard isSuggestionSafe(source: source, target: target) else {
+            return nil
+        }
+        guard hasSufficientSourceTargetOverlap(source: source, target: target, evidence: evidence) else {
+            return nil
+        }
+
+        let targetTermStatus = CustomVocabularyManager.targetTermStatus(
+            for: target,
+            snapshot: request.vocabulary
+        )
+
+        return LLMVocabularySuggestion(
+            source: source,
+            target: target,
+            evidence: evidence,
+            confidence: confidence,
+            targetTermStatus: targetTermStatus,
+            status: .pending,
+            normalizedSource: normalizedSource,
+            normalizedTarget: normalizedTarget
+        )
+    }
+
+    private func normalizedEvidence(
+        _ rawEvidence: String?,
+        hasUserEditSignal: Bool
+    ) -> LLMSuggestionEvidence {
+        guard let rawEvidence = rawEvidence?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased() else {
+            return hasUserEditSignal ? .mixed : .transcriptOnly
+        }
+
+        switch rawEvidence {
+        case "transcript_only", "transcriptonly":
+            return .transcriptOnly
+        case "user_edit", "useredit":
+            return .userEdit
+        case "mixed":
+            return .mixed
+        default:
+            return hasUserEditSignal ? .mixed : .transcriptOnly
+        }
+    }
+
+    private func defaultConfidence(for evidence: LLMSuggestionEvidence) -> Double {
+        switch evidence {
+        case .transcriptOnly:
+            return 0.72
+        case .userEdit:
+            return 0.82
+        case .mixed:
+            return 0.8
+        }
+    }
+
+    private func minimumConfidence(for evidence: LLMSuggestionEvidence) -> Double {
+        switch evidence {
+        case .transcriptOnly:
+            return 0.8
+        case .userEdit:
+            return 0.75
+        case .mixed:
+            return 0.78
+        }
+    }
+
+    private func isSuggestionSafe(source: String, target: String) -> Bool {
+        guard source.count <= 80, target.count <= 80 else {
+            return false
+        }
+        guard !source.contains("\n"), !target.contains("\n") else {
+            return false
+        }
+        guard !containsLikelyUnsafeTerm(source), !containsLikelyUnsafeTerm(target) else {
+            return false
+        }
+        guard
+            CustomVocabularyManager.containsSubstantiveContent(source),
+            CustomVocabularyManager.containsSubstantiveContent(target)
+        else {
+            return false
+        }
+        return true
+    }
+
+    private func containsLikelyUnsafeTerm(_ value: String) -> Bool {
+        let lower = value.lowercased()
+        if lower.contains("http://") || lower.contains("https://") || lower.contains("www.") {
+            return true
+        }
+        if value.contains("/") || value.contains("\\") {
+            return true
+        }
+        return false
+    }
+
+    private func hasSufficientSourceTargetOverlap(
+        source: String,
+        target: String,
+        evidence: LLMSuggestionEvidence
+    ) -> Bool {
+        let sourceCollapsed = CustomVocabularyManager.normalizedCollapsedKey(source)
+        let targetCollapsed = CustomVocabularyManager.normalizedCollapsedKey(target)
+        guard !sourceCollapsed.isEmpty, !targetCollapsed.isEmpty else {
+            return false
+        }
+
+        if sourceCollapsed == targetCollapsed {
+            return true
+        }
+
+        if isLikelyAcronymExpansion(source: sourceCollapsed, target: target) {
+            return true
+        }
+
+        let distance = editDistance(sourceCollapsed, targetCollapsed)
+        let maxLen = max(sourceCollapsed.count, targetCollapsed.count)
+        guard maxLen > 0 else { return false }
+        let similarity = 1 - (Double(distance) / Double(maxLen))
+
+        let minimumSimilarity: Double
+        switch evidence {
+        case .transcriptOnly:
+            minimumSimilarity = 0.46
+        case .userEdit:
+            minimumSimilarity = 0.34
+        case .mixed:
+            minimumSimilarity = 0.4
+        }
+
+        return similarity >= minimumSimilarity
+    }
+
+    private func isLikelyAcronymExpansion(source: String, target: String) -> Bool {
+        guard source.count >= 2, source.count <= 5 else {
+            return false
+        }
+        let words = CustomVocabularyManager
+            .sanitizedTerm(target)
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+        guard words.count >= source.count else {
+            return false
+        }
+
+        let initials = words.compactMap { word -> Character? in
+            guard let first = CustomVocabularyManager
+                .normalizedCollapsedKey(word)
+                .first else {
+                return nil
+            }
+            return first
+        }
+        guard initials.count >= source.count else {
+            return false
+        }
+        return String(initials.prefix(source.count)) == source
+    }
+
+    private func mergedEvidence(_ lhs: LLMSuggestionEvidence, _ rhs: LLMSuggestionEvidence) -> LLMSuggestionEvidence {
+        if lhs == rhs {
+            return lhs
+        }
+        return .mixed
+    }
+
+    private func editDistance(_ lhs: String, _ rhs: String) -> Int {
+        if lhs == rhs {
+            return 0
+        }
+        if lhs.isEmpty {
+            return rhs.count
+        }
+        if rhs.isEmpty {
+            return lhs.count
+        }
+
+        let lhsChars = Array(lhs)
+        let rhsChars = Array(rhs)
+        var previousRow = Array(0...rhsChars.count)
+        var currentRow = Array(repeating: 0, count: rhsChars.count + 1)
+
+        for (lhsIndex, lhsChar) in lhsChars.enumerated() {
+            currentRow[0] = lhsIndex + 1
+            for (rhsIndex, rhsChar) in rhsChars.enumerated() {
+                let substitutionCost = lhsChar == rhsChar ? 0 : 1
+                currentRow[rhsIndex + 1] = min(
+                    previousRow[rhsIndex + 1] + 1,
+                    currentRow[rhsIndex] + 1,
+                    previousRow[rhsIndex] + substitutionCost
+                )
+            }
+            swap(&previousRow, &currentRow)
+        }
+
+        return previousRow[rhsChars.count]
     }
 
     private func observe(_ response: LocalLLMResponse) {

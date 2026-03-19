@@ -125,6 +125,8 @@ public final class DictationController: ObservableObject {
 
     public func startRecording(onCaptureReady: (@MainActor @Sendable () -> Void)? = nil) throws {
         guard state == .idle else { return }
+        // A new transcription cycle starts now; stop any prior correction-learning timer/session.
+        CorrectionLearningMonitor.shared.cancel()
         processingTimeoutTask?.cancel()
         processingTimeoutTask = nil
         finalProcessingTask?.cancel()

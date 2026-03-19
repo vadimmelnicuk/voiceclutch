@@ -243,7 +243,7 @@ actor NemotronStreamingAsrManager {
     }
 
     func loadModels(modelDir: URL) async throws {
-        logger.info("Loading vendored Nemotron models from \(modelDir.path)")
+        logger.info("Loading from \(modelDir.path)")
 
         let metadataPath = modelDir.appendingPathComponent("metadata.json")
         if FileManager.default.fileExists(atPath: metadataPath.path) {
@@ -269,7 +269,7 @@ actor NemotronStreamingAsrManager {
         self.tokenizer = try NemotronTokenizer(vocabPath: modelDir.appendingPathComponent("tokenizer.json"))
 
         try resetStates()
-        logger.info("Vendored Nemotron models loaded successfully")
+        logger.info("Loaded successfully")
     }
 
     func reset() async {

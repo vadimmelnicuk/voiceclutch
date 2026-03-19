@@ -62,22 +62,82 @@ struct LearnedCorrectionRule: Codable, Hashable, Sendable {
     }
 }
 
+enum LLMSuggestionEvidence: String, Codable, Hashable, Sendable {
+    case transcriptOnly = "transcript_only"
+    case userEdit = "user_edit"
+    case mixed
+}
+
+enum LLMSuggestionStatus: String, Codable, Hashable, Sendable {
+    case pending
+    case approved
+    case dismissed
+}
+
+enum LLMSuggestionTargetTermStatus: String, Codable, Hashable, Sendable {
+    case existing
+    case new
+}
+
+struct LLMVocabularySuggestion: Codable, Hashable, Sendable {
+    let id: UUID
+    let source: String
+    let target: String
+    var evidence: LLMSuggestionEvidence
+    private(set) var normalizedSource: String
+    private(set) var normalizedTarget: String
+    var confidence: Double
+    var targetTermStatus: LLMSuggestionTargetTermStatus
+    var status: LLMSuggestionStatus
+    let createdAt: Date
+    var updatedAt: Date
+
+    init(
+        id: UUID = UUID(),
+        source: String,
+        target: String,
+        evidence: LLMSuggestionEvidence,
+        confidence: Double,
+        targetTermStatus: LLMSuggestionTargetTermStatus,
+        status: LLMSuggestionStatus = .pending,
+        normalizedSource: String? = nil,
+        normalizedTarget: String? = nil,
+        createdAt: Date = Date(),
+        updatedAt: Date = Date()
+    ) {
+        self.id = id
+        self.source = source
+        self.target = target
+        self.evidence = evidence
+        self.confidence = confidence
+        self.targetTermStatus = targetTermStatus
+        self.normalizedSource = normalizedSource ?? CustomVocabularyManager.normalizedLookupKey(source)
+        self.normalizedTarget = normalizedTarget ?? CustomVocabularyManager.normalizedLookupKey(target)
+        self.status = status
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+}
+
 struct CustomVocabularySnapshot: Sendable {
     let editorText: String
     let manualEntries: [ManualVocabularyEntry]
     let shortcutEntries: [ShortcutVocabularyEntry]
     let learnedRules: [LearnedCorrectionRule]
+    let pendingSuggestions: [LLMVocabularySuggestion]
 
     init(
         editorText: String = "",
         manualEntries: [ManualVocabularyEntry] = [],
         shortcutEntries: [ShortcutVocabularyEntry] = [],
-        learnedRules: [LearnedCorrectionRule] = []
+        learnedRules: [LearnedCorrectionRule] = [],
+        pendingSuggestions: [LLMVocabularySuggestion] = []
     ) {
         self.editorText = editorText
         self.manualEntries = manualEntries
         self.shortcutEntries = shortcutEntries
         self.learnedRules = learnedRules
+        self.pendingSuggestions = pendingSuggestions
     }
 }
 
@@ -101,6 +161,7 @@ enum CustomVocabularyError: LocalizedError {
     case invalidOriginalText
     case invalidReplacementText
     case invalidShortcutEntry
+    case entryNotFound
 
     var errorDescription: String? {
         switch self {
@@ -112,6 +173,8 @@ enum CustomVocabularyError: LocalizedError {
             return "Enter a replacement word/phrase."
         case .invalidShortcutEntry:
             return "Enter one shortcut using `trigger => replacement`."
+        case .entryNotFound:
+            return "This vocabulary entry no longer exists."
         }
     }
 }
@@ -124,8 +187,48 @@ final class CustomVocabularyManager: @unchecked Sendable {
         var manualEntries: [ManualVocabularyEntry]
         var shortcutEntries: [ShortcutVocabularyEntry]
         var learnedRules: [LearnedCorrectionRule]
+        var llmSuggestions: [LLMVocabularySuggestion]
         let createdAt: Date
         var updatedAt: Date
+
+        private enum CodingKeys: String, CodingKey {
+            case schemaVersion
+            case manualEntries
+            case shortcutEntries
+            case learnedRules
+            case llmSuggestions
+            case createdAt
+            case updatedAt
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            schemaVersion = try container.decode(Int.self, forKey: .schemaVersion)
+            manualEntries = try container.decode([ManualVocabularyEntry].self, forKey: .manualEntries)
+            shortcutEntries = try container.decode([ShortcutVocabularyEntry].self, forKey: .shortcutEntries)
+            learnedRules = try container.decode([LearnedCorrectionRule].self, forKey: .learnedRules)
+            llmSuggestions = try container.decodeIfPresent([LLMVocabularySuggestion].self, forKey: .llmSuggestions) ?? []
+            createdAt = try container.decode(Date.self, forKey: .createdAt)
+            updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        }
+
+        init(
+            schemaVersion: Int,
+            manualEntries: [ManualVocabularyEntry],
+            shortcutEntries: [ShortcutVocabularyEntry],
+            learnedRules: [LearnedCorrectionRule],
+            llmSuggestions: [LLMVocabularySuggestion],
+            createdAt: Date,
+            updatedAt: Date
+        ) {
+            self.schemaVersion = schemaVersion
+            self.manualEntries = manualEntries
+            self.shortcutEntries = shortcutEntries
+            self.learnedRules = learnedRules
+            self.llmSuggestions = llmSuggestions
+            self.createdAt = createdAt
+            self.updatedAt = updatedAt
+        }
 
         static func empty(now: Date = Date()) -> PersistedState {
             PersistedState(
@@ -133,12 +236,22 @@ final class CustomVocabularyManager: @unchecked Sendable {
                 manualEntries: [],
                 shortcutEntries: [],
                 learnedRules: [],
+                llmSuggestions: [],
                 createdAt: now,
                 updatedAt: now
             )
         }
 
-        static let currentSchemaVersion = 2
+        static let currentSchemaVersion = 3
+    }
+
+    private struct PersistedStateV2: Codable {
+        var schemaVersion: Int
+        var manualEntries: [ManualVocabularyEntry]
+        var shortcutEntries: [ShortcutVocabularyEntry]
+        var learnedRules: [LearnedCorrectionRule]
+        let createdAt: Date
+        var updatedAt: Date
     }
 
     private enum RewritePriority: Int {
@@ -155,6 +268,7 @@ final class CustomVocabularyManager: @unchecked Sendable {
 
     private static let legacyFileName = "custom-vocabulary.json"
     private static let fileName = "custom-vocabulary-v2.json"
+    private static let maxSuggestionHistoryCount = 240
 
     private let lock = NSLock()
     private let logger = AppLogger(category: "CustomVocabularyManager")
@@ -246,6 +360,135 @@ final class CustomVocabularyManager: @unchecked Sendable {
     }
 
     @discardableResult
+    func removeManualEntry(canonical: String) throws -> CustomVocabularySnapshot {
+        let normalizedKey = Self.normalizedLookupKey(canonical)
+        let snapshot = try mutateState { state in
+            state.manualEntries.removeAll { entry in
+                Self.normalizedLookupKey(entry.canonical) == normalizedKey
+            }
+        }
+        logger.info("Removed manual vocabulary entry '\(canonical)'")
+        return snapshot
+    }
+
+    @discardableResult
+    func removeShortcutEntry(id: UUID) throws -> CustomVocabularySnapshot {
+        let snapshot = try mutateState { state in
+            state.shortcutEntries.removeAll { $0.id == id }
+        }
+        logger.info("Removed shortcut vocabulary entry id=\(id.uuidString)")
+        return snapshot
+    }
+
+    @discardableResult
+    func updateManualEntry(
+        existingCanonical: String,
+        canonical: String,
+        aliases: [String]
+    ) throws -> CustomVocabularySnapshot {
+        let normalizedExisting = Self.normalizedLookupKey(existingCanonical)
+        guard !normalizedExisting.isEmpty else {
+            throw CustomVocabularyError.entryNotFound
+        }
+
+        let sanitizedCanonical = Self.sanitizedTerm(canonical)
+        let normalizedCanonical = Self.normalizedLookupKey(sanitizedCanonical)
+        guard !sanitizedCanonical.isEmpty, !normalizedCanonical.isEmpty else {
+            throw CustomVocabularyError.invalidManualEntry
+        }
+
+        let sanitizedAliases = aliases
+            .map(Self.sanitizedTerm)
+            .filter { alias in
+                let normalizedAlias = Self.normalizedLookupKey(alias)
+                return !alias.isEmpty && !normalizedAlias.isEmpty && normalizedAlias != normalizedCanonical
+            }
+
+        let snapshot = try mutateState { state in
+            guard let index = state.manualEntries.firstIndex(where: {
+                Self.normalizedLookupKey($0.canonical) == normalizedExisting
+            }) else {
+                throw CustomVocabularyError.entryNotFound
+            }
+
+            state.manualEntries[index] = ManualVocabularyEntry(
+                canonical: sanitizedCanonical,
+                aliases: sanitizedAliases
+            )
+            state.manualEntries = Self.mergeManualEntries(state.manualEntries)
+        }
+        logger.info("Updated manual vocabulary entry '\(existingCanonical)' -> '\(sanitizedCanonical)'")
+        return snapshot
+    }
+
+    @discardableResult
+    func updateShortcutEntry(id: UUID, trigger: String, replacement: String) throws -> CustomVocabularySnapshot {
+        let sanitizedTrigger = Self.sanitizedTerm(trigger)
+        let sanitizedReplacement = Self.sanitizedTerm(replacement)
+        let normalizedTrigger = Self.normalizedLookupKey(sanitizedTrigger)
+        let normalizedReplacement = Self.normalizedLookupKey(sanitizedReplacement)
+        guard !normalizedTrigger.isEmpty else {
+            throw CustomVocabularyError.invalidOriginalText
+        }
+        guard !normalizedReplacement.isEmpty else {
+            throw CustomVocabularyError.invalidReplacementText
+        }
+        guard normalizedTrigger != normalizedReplacement else {
+            throw CustomVocabularyError.invalidShortcutEntry
+        }
+
+        let snapshot = try mutateState { state in
+            guard let index = state.shortcutEntries.firstIndex(where: { $0.id == id }) else {
+                throw CustomVocabularyError.entryNotFound
+            }
+            let now = Date()
+            state.shortcutEntries[index] = ShortcutVocabularyEntry(
+                id: id,
+                trigger: sanitizedTrigger,
+                replacement: sanitizedReplacement,
+                createdAt: state.shortcutEntries[index].createdAt,
+                updatedAt: now
+            )
+        }
+        logger.info("Updated shortcut vocabulary entry id=\(id.uuidString)")
+        return snapshot
+    }
+
+    @discardableResult
+    func updateLearnedRule(id: UUID, source: String, target: String) throws -> CustomVocabularySnapshot {
+        let sanitizedSource = Self.sanitizedTerm(source)
+        let sanitizedTarget = Self.sanitizedTerm(target)
+        let normalizedSource = Self.normalizedLookupKey(sanitizedSource)
+        let normalizedTarget = Self.normalizedLookupKey(sanitizedTarget)
+        guard !normalizedSource.isEmpty else {
+            throw CustomVocabularyError.invalidOriginalText
+        }
+        guard !normalizedTarget.isEmpty else {
+            throw CustomVocabularyError.invalidReplacementText
+        }
+        guard normalizedSource != normalizedTarget else {
+            throw CustomVocabularyError.invalidShortcutEntry
+        }
+
+        let snapshot = try mutateState { state in
+            guard let index = state.learnedRules.firstIndex(where: { $0.id == id }) else {
+                throw CustomVocabularyError.entryNotFound
+            }
+            let now = Date()
+            state.learnedRules[index] = LearnedCorrectionRule(
+                id: id,
+                source: sanitizedSource,
+                target: sanitizedTarget,
+                count: max(1, state.learnedRules[index].count),
+                createdAt: state.learnedRules[index].createdAt,
+                updatedAt: now
+            )
+        }
+        logger.info("Updated learned correction rule id=\(id.uuidString)")
+        return snapshot
+    }
+
+    @discardableResult
     func recordLearnedRule(from source: String, to target: String) throws -> CustomVocabularySnapshot {
         guard AutoAddCorrectionsPreference.load() else {
             return snapshot()
@@ -298,6 +541,217 @@ final class CustomVocabularyManager: @unchecked Sendable {
         return snapshot
     }
 
+    @discardableResult
+    func upsertLearnedRule(
+        source: String,
+        target: String,
+        count: Int = 1
+    ) throws -> CustomVocabularySnapshot {
+        let sanitizedSource = Self.sanitizedTerm(source)
+        let sanitizedTarget = Self.sanitizedTerm(target)
+        guard !sanitizedSource.isEmpty, !sanitizedTarget.isEmpty else {
+            return snapshot()
+        }
+
+        let normalizedSource = Self.normalizedLookupKey(sanitizedSource)
+        let normalizedTarget = Self.normalizedLookupKey(sanitizedTarget)
+        guard !normalizedSource.isEmpty, !normalizedTarget.isEmpty, normalizedSource != normalizedTarget else {
+            return snapshot()
+        }
+
+        let snapshot = try mutateState { state in
+            let now = Date()
+            if let index = state.learnedRules.firstIndex(where: {
+                Self.normalizedLookupKey($0.source) == normalizedSource
+                    && Self.normalizedLookupKey($0.target) == normalizedTarget
+            }) {
+                state.learnedRules[index].count = max(1, state.learnedRules[index].count, count)
+                state.learnedRules[index].updatedAt = now
+            } else {
+                state.learnedRules.append(
+                    LearnedCorrectionRule(
+                        source: sanitizedSource,
+                        target: sanitizedTarget,
+                        count: max(1, count),
+                        createdAt: now,
+                        updatedAt: now
+                    )
+                )
+            }
+        }
+        logger.info("Upserted learned correction '\(sanitizedSource)' -> '\(sanitizedTarget)'")
+        return snapshot
+    }
+
+    func llmSuggestions(status: LLMSuggestionStatus? = nil) -> [LLMVocabularySuggestion] {
+        lock.lock()
+        defer { lock.unlock() }
+
+        let suggestions = state.llmSuggestions
+            .sorted { lhs, rhs in
+                if lhs.status != rhs.status {
+                    return lhs.status == .pending
+                }
+                if lhs.confidence != rhs.confidence {
+                    return lhs.confidence > rhs.confidence
+                }
+                return lhs.updatedAt > rhs.updatedAt
+            }
+
+        if let status {
+            return suggestions.filter { $0.status == status }
+        }
+        return suggestions
+    }
+
+    @discardableResult
+    func addLLMSuggestions(_ suggestions: [LLMVocabularySuggestion]) throws -> CustomVocabularySnapshot {
+        guard !suggestions.isEmpty else {
+            return snapshot()
+        }
+
+        let sanitizedSuggestions = suggestions.compactMap(sanitizeSuggestion)
+        guard !sanitizedSuggestions.isEmpty else {
+            return snapshot()
+        }
+
+        let snapshot = try mutateState { state in
+            let now = Date()
+            trimSuggestionHistory(in: &state, now: now)
+
+            for incoming in sanitizedSuggestions {
+                let incomingSource = incoming.normalizedSource
+                let incomingTarget = incoming.normalizedTarget
+
+                if let pendingIndex = state.llmSuggestions.firstIndex(where: { suggestion in
+                    suggestion.status == .pending &&
+                        suggestion.normalizedSource == incomingSource &&
+                        suggestion.normalizedTarget == incomingTarget
+                }) {
+                    state.llmSuggestions[pendingIndex].updatedAt = now
+                    state.llmSuggestions[pendingIndex].confidence = max(
+                        state.llmSuggestions[pendingIndex].confidence,
+                        incoming.confidence
+                    )
+                    state.llmSuggestions[pendingIndex].evidence = mergeEvidence(
+                        state.llmSuggestions[pendingIndex].evidence,
+                        incoming.evidence
+                    )
+                    state.llmSuggestions[pendingIndex].targetTermStatus = incoming.targetTermStatus
+                    continue
+                }
+
+                state.llmSuggestions.append(
+                    LLMVocabularySuggestion(
+                        source: incoming.source,
+                        target: incoming.target,
+                        evidence: incoming.evidence,
+                        confidence: incoming.confidence,
+                        targetTermStatus: incoming.targetTermStatus,
+                        status: .pending,
+                        normalizedSource: incomingSource,
+                        normalizedTarget: incomingTarget,
+                        createdAt: now,
+                        updatedAt: now
+                    )
+                )
+            }
+
+            trimSuggestionHistory(in: &state, now: now)
+        }
+        logger.info("Added \(sanitizedSuggestions.count) LLM vocabulary suggestion(s)")
+        return snapshot
+    }
+
+    @discardableResult
+    func approveLLMSuggestion(id: UUID) throws -> CustomVocabularySnapshot {
+        let snapshot = try mutateState { state in
+            guard let suggestionIndex = state.llmSuggestions.firstIndex(where: { $0.id == id }),
+                  state.llmSuggestions[suggestionIndex].status == .pending else {
+                return
+            }
+
+            let now = Date()
+            let suggestion = state.llmSuggestions[suggestionIndex]
+            state.llmSuggestions[suggestionIndex].status = .approved
+            state.llmSuggestions[suggestionIndex].updatedAt = now
+
+            let source = Self.sanitizedTerm(suggestion.source)
+            let target = Self.sanitizedTerm(suggestion.target)
+            let normalizedSource = Self.normalizedLookupKey(source)
+            let normalizedTarget = Self.normalizedLookupKey(target)
+            guard
+                !source.isEmpty,
+                !target.isEmpty,
+                !normalizedSource.isEmpty,
+                !normalizedTarget.isEmpty,
+                normalizedSource != normalizedTarget
+            else {
+                return
+            }
+
+            if let learnedIndex = state.learnedRules.firstIndex(where: {
+                Self.normalizedLookupKey($0.source) == normalizedSource &&
+                    Self.normalizedLookupKey($0.target) == normalizedTarget
+            }) {
+                state.learnedRules[learnedIndex].count = max(1, state.learnedRules[learnedIndex].count)
+                state.learnedRules[learnedIndex].updatedAt = now
+            } else {
+                state.learnedRules.append(
+                    LearnedCorrectionRule(
+                        source: source,
+                        target: target,
+                        count: 1,
+                        createdAt: now,
+                        updatedAt: now
+                    )
+                )
+            }
+        }
+        logger.info("Approved LLM suggestion id=\(id.uuidString)")
+        return snapshot
+    }
+
+    @discardableResult
+    func dismissLLMSuggestion(id: UUID) throws -> CustomVocabularySnapshot {
+        let snapshot = try mutateState { state in
+            guard let suggestionIndex = state.llmSuggestions.firstIndex(where: { $0.id == id }),
+                  state.llmSuggestions[suggestionIndex].status == .pending else {
+                return
+            }
+
+            state.llmSuggestions[suggestionIndex].status = .dismissed
+            state.llmSuggestions[suggestionIndex].updatedAt = Date()
+        }
+        logger.info("Dismissed LLM suggestion id=\(id.uuidString)")
+        return snapshot
+    }
+
+    @discardableResult
+    func clearDismissedAndOldSuggestions(maxAgeDays: Int = 30) throws -> CustomVocabularySnapshot {
+        let maxAge = max(1, maxAgeDays)
+        let now = Date()
+        let cutoff = now.addingTimeInterval(-TimeInterval(maxAge * 86_400))
+
+        lock.lock()
+        let hasRemovableSuggestions = state.llmSuggestions.contains { suggestion in
+            suggestion.status != .pending || suggestion.updatedAt < cutoff
+        }
+        lock.unlock()
+
+        guard hasRemovableSuggestions else {
+            return snapshot()
+        }
+
+        let snapshot = try mutateState { state in
+            state.llmSuggestions.removeAll { suggestion in
+                suggestion.status != .pending || suggestion.updatedAt < cutoff
+            }
+        }
+        logger.info("Cleared dismissed/old LLM suggestions")
+        return snapshot
+    }
+
     func applyRewriteRules(to text: String) -> String {
         Self.applyRewriteRules(to: text, snapshot: snapshot())
     }
@@ -312,6 +766,10 @@ final class CustomVocabularyManager: @unchecked Sendable {
 
     func glossaryEntries(limit: Int = 24) -> [VocabularyGlossaryEntry] {
         Self.glossaryEntries(from: snapshot(), limit: limit)
+    }
+
+    func targetTermStatus(for target: String) -> LLMSuggestionTargetTermStatus {
+        Self.targetTermStatus(for: target, snapshot: snapshot())
     }
 
     static func applyRewriteRules(to text: String, snapshot: CustomVocabularySnapshot) -> String {
@@ -353,7 +811,14 @@ final class CustomVocabularyManager: @unchecked Sendable {
         }
 
         for entry in snapshot.shortcutEntries {
-            registerRule(source: entry.trigger, replacement: entry.replacement, priority: .shortcut)
+            let triggers = parseCommaSeparatedTerms(entry.trigger)
+            if triggers.isEmpty {
+                registerRule(source: entry.trigger, replacement: entry.replacement, priority: .shortcut)
+            } else {
+                for trigger in triggers {
+                    registerRule(source: trigger, replacement: entry.replacement, priority: .shortcut)
+                }
+            }
         }
 
         let promotedLearnedRules = snapshot.learnedRules
@@ -366,7 +831,14 @@ final class CustomVocabularyManager: @unchecked Sendable {
             }
 
         for learnedRule in promotedLearnedRules {
-            registerRule(source: learnedRule.source, replacement: learnedRule.target, priority: .learned)
+            let sources = parseCommaSeparatedTerms(learnedRule.source)
+            if sources.isEmpty {
+                registerRule(source: learnedRule.source, replacement: learnedRule.target, priority: .learned)
+            } else {
+                for source in sources {
+                    registerRule(source: source, replacement: learnedRule.target, priority: .learned)
+                }
+            }
         }
 
         return prioritizedBySource.values
@@ -461,6 +933,35 @@ final class CustomVocabularyManager: @unchecked Sendable {
         return Array(entries.prefix(limit))
     }
 
+    static func targetTermStatus(
+        for target: String,
+        snapshot: CustomVocabularySnapshot
+    ) -> LLMSuggestionTargetTermStatus {
+        let normalizedTarget = normalizedLookupKey(target)
+        guard !normalizedTarget.isEmpty else {
+            return .new
+        }
+
+        for entry in snapshot.manualEntries {
+            if normalizedLookupKey(entry.canonical) == normalizedTarget {
+                return .existing
+            }
+            if entry.aliases.contains(where: { normalizedLookupKey($0) == normalizedTarget }) {
+                return .existing
+            }
+        }
+
+        if snapshot.shortcutEntries.contains(where: { normalizedLookupKey($0.replacement) == normalizedTarget }) {
+            return .existing
+        }
+
+        if snapshot.learnedRules.contains(where: { normalizedLookupKey($0.target) == normalizedTarget }) {
+            return .existing
+        }
+
+        return .new
+    }
+
     static func mergedManualEntries(
         existing: [ManualVocabularyEntry],
         additions: [ManualVocabularyEntry]
@@ -472,15 +973,22 @@ final class CustomVocabularyManager: @unchecked Sendable {
         _ mutation: (inout PersistedState) throws -> Void
     ) throws -> CustomVocabularySnapshot {
         lock.lock()
-        defer { lock.unlock() }
+        let snapshot: CustomVocabularySnapshot
+        do {
+            var nextState = state
+            try mutation(&nextState)
+            nextState.updatedAt = Date()
+            try persist(nextState)
+            state = nextState
+            snapshot = Self.snapshot(from: nextState)
+        } catch {
+            lock.unlock()
+            throw error
+        }
+        lock.unlock()
 
-        var nextState = state
-        try mutation(&nextState)
-        nextState.updatedAt = Date()
-        try persist(nextState)
-        state = nextState
         NotificationCenter.default.post(name: .customVocabularyDidChange, object: nil)
-        return Self.snapshot(from: nextState)
+        return snapshot
     }
 
     private static func snapshot(from state: PersistedState) -> CustomVocabularySnapshot {
@@ -503,11 +1011,21 @@ final class CustomVocabularyManager: @unchecked Sendable {
             return lhsKey < rhsKey
         }
 
+        let pendingSuggestions = state.llmSuggestions
+            .filter { $0.status == .pending }
+            .sorted { lhs, rhs in
+                if lhs.confidence != rhs.confidence {
+                    return lhs.confidence > rhs.confidence
+                }
+                return lhs.updatedAt > rhs.updatedAt
+            }
+
         return CustomVocabularySnapshot(
             editorText: editorText(from: state.manualEntries),
             manualEntries: state.manualEntries,
             shortcutEntries: sortedShortcuts,
-            learnedRules: sortedLearnedRules
+            learnedRules: sortedLearnedRules,
+            pendingSuggestions: pendingSuggestions
         )
     }
 
@@ -518,15 +1036,26 @@ final class CustomVocabularyManager: @unchecked Sendable {
 
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        guard let decoded = try? decoder.decode(PersistedState.self, from: data) else {
-            return PersistedState.empty()
+        if let decoded = try? decoder.decode(PersistedState.self, from: data),
+           decoded.schemaVersion == PersistedState.currentSchemaVersion {
+            return decoded
         }
 
-        guard decoded.schemaVersion == PersistedState.currentSchemaVersion else {
-            return PersistedState.empty()
+        if let legacy = try? decoder.decode(PersistedStateV2.self, from: data),
+           legacy.schemaVersion == 2 {
+            logger.info("Migrated custom vocabulary store from schema v2 to v3")
+            return PersistedState(
+                schemaVersion: PersistedState.currentSchemaVersion,
+                manualEntries: legacy.manualEntries,
+                shortcutEntries: legacy.shortcutEntries,
+                learnedRules: legacy.learnedRules,
+                llmSuggestions: [],
+                createdAt: legacy.createdAt,
+                updatedAt: legacy.updatedAt
+            )
         }
 
-        return decoded
+        return PersistedState.empty()
     }
 
     private func persist(_ state: PersistedState) throws {
@@ -608,6 +1137,71 @@ final class CustomVocabularyManager: @unchecked Sendable {
         }
         logger.info("Added shortcut replacement '\(triggers.joined(separator: ", "))' -> '\(replacement)'")
         return snapshot
+    }
+
+    private func sanitizeSuggestion(_ suggestion: LLMVocabularySuggestion) -> LLMVocabularySuggestion? {
+        let source = Self.sanitizedTerm(suggestion.source)
+        let target = Self.sanitizedTerm(suggestion.target)
+        let normalizedSource = Self.normalizedLookupKey(source)
+        let normalizedTarget = Self.normalizedLookupKey(target)
+        guard
+            !source.isEmpty,
+            !target.isEmpty,
+            !normalizedSource.isEmpty,
+            !normalizedTarget.isEmpty,
+            normalizedSource != normalizedTarget,
+            Self.containsSubstantiveContent(source),
+            Self.containsSubstantiveContent(target)
+        else {
+            return nil
+        }
+
+        if source.count > 80 || target.count > 80 {
+            return nil
+        }
+        if source.contains("\n") || target.contains("\n") {
+            return nil
+        }
+
+        return LLMVocabularySuggestion(
+            id: suggestion.id,
+            source: source,
+            target: target,
+            evidence: suggestion.evidence,
+            confidence: min(1, max(0, suggestion.confidence)),
+            targetTermStatus: suggestion.targetTermStatus,
+            status: .pending,
+            createdAt: suggestion.createdAt,
+            updatedAt: suggestion.updatedAt
+        )
+    }
+
+    private func mergeEvidence(_ lhs: LLMSuggestionEvidence, _ rhs: LLMSuggestionEvidence) -> LLMSuggestionEvidence {
+        if lhs == rhs {
+            return lhs
+        }
+        return .mixed
+    }
+
+    private func trimSuggestionHistory(in state: inout PersistedState, now: Date) {
+        let cutoff = now.addingTimeInterval(-TimeInterval(60 * 86_400))
+        state.llmSuggestions.removeAll { suggestion in
+            suggestion.status != .pending && suggestion.updatedAt < cutoff
+        }
+
+        if state.llmSuggestions.count <= Self.maxSuggestionHistoryCount {
+            return
+        }
+
+        state.llmSuggestions = state.llmSuggestions
+            .sorted { lhs, rhs in
+                if lhs.status != rhs.status {
+                    return lhs.status == .pending
+                }
+                return lhs.updatedAt > rhs.updatedAt
+            }
+            .prefix(Self.maxSuggestionHistoryCount)
+            .map { $0 }
     }
 
     private static func parseShortcutLine(_ text: String) throws -> (trigger: String, replacement: String) {
