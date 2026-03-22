@@ -43,6 +43,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private let mediaPlaybackController = MediaPlaybackController()
     private let permissionsCoordinator = PermissionsCoordinator()
     private var statusBarController: StatusBarController?
+    private var permissionOnboardingWindowController: PermissionOnboardingWindowController?
     private var currentInteractionMode = ListeningInteractionMode.load()
     private var currentListeningShortcut = ListeningShortcut.load()
     private var currentListeningShortcutConfig: HotkeyConfig = ListeningShortcut.load().hotkeyConfig
@@ -56,22 +57,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var shouldPlayStopChimeForCurrentSession = false
     private var hasCompletedInitialPreparation = false
     private var hasShownHotkeyRecoveryNotification = false
-
-    private enum DefaultsKeys {
-        static let didRequestInitialPermissions = "dev.vm.voiceclutch.didRequestInitialPermissions"
-    }
+    private var hasDismissedPermissionOnboardingWhileMissingPermissions = false
+    private var hasShownPermissionOnboardingReminderThisSession = false
+    private var wasFullyReadyForUse = false
 
     private enum NotificationMessage {
-        static let hotkeyActivationReady = "Listening shortcut is active."
-        static let hotkeyWaitingForAccessibility = "Waiting for Accessibility permission. VoiceClutch will retry automatically."
-        static let hotkeyRevoked = "Accessibility permission revoked. Listening shortcut is disabled."
-        static let hotkeyNeedsAccessibility = "Enable Accessibility permission to activate the listening shortcut."
-        static let hotkeyRequiresAccessibility = "Accessibility permission is required for global hotkeys."
-        static let hotkeyInvalidShortcut = "Could not register listening shortcut. Choose another key combination."
-        static let permissionsMissing = "Permissions missing. Open Preferences > Permissions."
-        static let micPermissionPending = "Microphone permission is pending. Open Preferences > Permissions."
-        static let micPermissionDenied = "Microphone permission is denied. Open Preferences > Permissions."
-        static let micPermissionUnknown = "Microphone permission status is unknown."
+        static let hotkeyActivationReady = "Listening shortcut is active"
+        static let hotkeyWaitingForAccessibility = "Waiting for Accessibility permission\nVoiceClutch will retry automatically"
+        static let hotkeyNeedsAccessibility = "Enable Accessibility permission to activate the listening shortcut"
+        static let hotkeyRequiresAccessibility = "Accessibility permission is required for global hotkeys"
+        static let hotkeyInvalidShortcut = "Could not register listening shortcut\nChoose another key combination"
+        static let permissionsMissing = "Permissions missing\nComplete setup to continue dictation"
+        static let micPermissionPending = "Microphone permission is pending\nComplete setup to continue dictation"
+        static let micPermissionDenied = "Microphone permission is denied\nOpen System Settings to allow access"
+        static let micPermissionUnknown = "Microphone permission status is unknown"
     }
 
     // MARK: - Lifecycle
@@ -90,9 +89,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupPermissionMonitoring()
         setupVocabularySuggestionNotifications()
 
-        Task { [weak self] in
-            await self?.runInitialPermissionOnboardingIfNeeded()
-        }
+        runInitialPermissionOnboardingIfNeeded()
     }
 
     // MARK: - Model Management
@@ -101,15 +98,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let needsDownload = !dictationController.areModelsInstalled()
 
         if needsDownload {
-            // First launch - download models
-
-            if let downloadSizeBytes = await dictationController.requiredDownloadSize() {
-                await showFirstLaunchAlert(sizeBytes: downloadSizeBytes)
-            } else {
-                // Fall back to showing alert without size
-                await showFirstLaunchAlert(sizeBytes: nil)
-            }
-
+            let downloadSizeBytes = await dictationController.requiredDownloadSize()
+            showDownloadStartingNotification(sizeBytes: downloadSizeBytes)
             dictationController.setState(.downloading)
         }
 
@@ -117,15 +107,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         LocalLLMCoordinator.preloadModelInBackground()
 
         do {
-            let outcome = try await dictationController.prepareForUse()
+            try await dictationController.prepareForUse()
             #if DEBUG
             let timestamp = DateFormatter.timestamp.string(from: Date())
             print("\(timestamp) ✅ VoiceClutch ready")
             #endif
 
-            if outcome == .downloadedModels {
-                showDownloadCompleteNotification()
-            }
+            showReadyNotificationIfEligible()
         } catch {
             print("❌ Model download failed: \(error)")
             dictationController.setState(.idle)
@@ -149,10 +137,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func showFirstLaunchAlert(sizeBytes: Int64?) async {
-        let alert = NSAlert()
-        alert.messageText = "Downloading required models"
-
+    private func showDownloadStartingNotification(sizeBytes: Int64?) {
         let sizeText: String
         if let sizeBytes = sizeBytes {
             let sizeGB = Double(sizeBytes) / 1_073_741_824.0
@@ -166,17 +151,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             sizeText = "1 GB"
         }
 
-        alert.informativeText = "VoiceClutch needs to download local models (\(sizeText)). This only happens once."
-        alert.alertStyle = .informational
-        alert.addButton(withTitle: "OK")
-        alert.runModal()
+        statusBarController?.showToolbarNotification(
+            "Downloading required models (\(sizeText))\nThis only happens once",
+            duration: 5.0
+        )
     }
 
     private func showDownloadCompleteNotification() {
         statusBarController?.showToolbarNotification(
-            "VoiceClutch is ready.\nPress and hold Left Control to start dictation.",
+            "VoiceClutch is ready\nPress and hold Left Control to start dictation",
             duration: 5.0
         )
+    }
+
+    private func showReadyNotificationIfEligible() {
+        let snapshot = permissionsCoordinator.snapshot
+        let isFullyReady = !hasMissingPermissions(snapshot) && dictationController.isReady
+        defer { wasFullyReadyForUse = isFullyReady }
+        guard isFullyReady, !wasFullyReadyForUse else { return }
+        showDownloadCompleteNotification()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -387,6 +380,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - Permissions
+    private enum PermissionOnboardingTrigger {
+        case launch
+        case hotkeyAttempt
+    }
+
     private func setupPermissionMonitoring() {
         permissionsCoordinator.$snapshot
             .receive(on: DispatchQueue.main)
@@ -402,13 +400,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func handlePermissionSnapshotUpdate(_ snapshot: PermissionSnapshot) {
         let previousSnapshot = lastPermissionSnapshot
         lastPermissionSnapshot = snapshot
+        if !hasMissingPermissions(snapshot) {
+            hasDismissedPermissionOnboardingWhileMissingPermissions = false
+            hasShownPermissionOnboardingReminderThisSession = false
+        }
+
         statusBarController?.updatePermissionStatus(
             accessibilityGranted: snapshot.accessibilityGranted,
             microphoneGranted: snapshot.microphoneStatus == .authorized
         )
         updateMissingPermissionShortcutFeedbackMonitoring(using: snapshot)
+        showReadyNotificationIfEligible()
 
-        if snapshot.accessibilityGranted && !hasCompletedInitialPreparation {
+        if !hasCompletedInitialPreparation {
             ensureModelsPrepared()
         }
 
@@ -425,16 +429,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if snapshot.accessibilityGranted {
             ensureHotkeyRegistered(showFailureNotification: true)
-            statusBarController?.showToolbarNotification("Accessibility permission granted.")
             return
         }
 
         hotkeyManager.unregister()
         stopHotkeyRecoveryLoop()
         hasShownHotkeyRecoveryNotification = false
-        statusBarController?.showToolbarNotification(
-            NotificationMessage.hotkeyRevoked
-        )
     }
 
     private func ensureModelsPrepared() {
@@ -448,29 +448,75 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private func runInitialPermissionOnboardingIfNeeded() async {
-        let defaults = UserDefaults.standard
-        let hasRequestedPermissions = defaults.bool(forKey: DefaultsKeys.didRequestInitialPermissions)
-
-        if !hasRequestedPermissions {
-            if !permissionsCoordinator.accessibilityGranted {
-                permissionsCoordinator.promptAccessibility()
-            }
-
-            _ = await permissionsCoordinator.requestMicrophoneAccessIfNeeded()
-            defaults.set(true, forKey: DefaultsKeys.didRequestInitialPermissions)
-        }
-
+    private func runInitialPermissionOnboardingIfNeeded() {
         permissionsCoordinator.refreshNow()
-
-        guard permissionsCoordinator.accessibilityGranted else {
-            statusBarController?.showToolbarNotification(
-                NotificationMessage.hotkeyNeedsAccessibility
-            )
+        let snapshot = permissionsCoordinator.snapshot
+        guard hasMissingPermissions(snapshot) else {
+            ensureHotkeyRegistered(showFailureNotification: true)
             return
         }
 
-        ensureHotkeyRegistered(showFailureNotification: true)
+        statusBarController?.showToolbarNotification(NotificationMessage.permissionsMissing)
+        presentPermissionOnboardingIfNeeded(trigger: .launch)
+    }
+
+    private func hasMissingPermissions(_ snapshot: PermissionSnapshot) -> Bool {
+        !snapshot.accessibilityGranted || snapshot.microphoneStatus != .authorized
+    }
+
+    private func permissionOnboardingController() -> PermissionOnboardingWindowController {
+        if let permissionOnboardingWindowController {
+            return permissionOnboardingWindowController
+        }
+
+        let controller = PermissionOnboardingWindowController(permissionsCoordinator: permissionsCoordinator)
+        controller.onDismissedWhileMissingPermissions = { [weak self] in
+            guard let self else { return }
+            self.hasDismissedPermissionOnboardingWhileMissingPermissions = true
+        }
+        controller.onPermissionsCompleted = { [weak self] in
+            guard let self else { return }
+            self.hasDismissedPermissionOnboardingWhileMissingPermissions = false
+            self.hasShownPermissionOnboardingReminderThisSession = false
+        }
+        permissionOnboardingWindowController = controller
+        return controller
+    }
+
+    private func presentPermissionOnboardingIfNeeded(trigger: PermissionOnboardingTrigger) {
+        permissionsCoordinator.refreshNow()
+        let snapshot = permissionsCoordinator.snapshot
+        guard hasMissingPermissions(snapshot) else {
+            return
+        }
+
+        let controller = permissionOnboardingController()
+        guard !controller.isVisible else {
+            return
+        }
+
+        switch trigger {
+        case .launch:
+            controller.showWindow()
+        case .hotkeyAttempt:
+            guard shouldShowOnboardingForHotkeyAttempt() else {
+                return
+            }
+            controller.showWindow()
+        }
+    }
+
+    private func shouldShowOnboardingForHotkeyAttempt() -> Bool {
+        guard hasDismissedPermissionOnboardingWhileMissingPermissions else {
+            return true
+        }
+
+        guard !hasShownPermissionOnboardingReminderThisSession else {
+            return false
+        }
+
+        hasShownPermissionOnboardingReminderThisSession = true
+        return true
     }
 
     // MARK: - Hotkey Handling
@@ -611,19 +657,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             statusBarController?.showToolbarNotification(
                 NotificationMessage.micPermissionPending
             )
-            Task { [weak self] in
-                _ = await self?.permissionsCoordinator.requestMicrophoneAccessIfNeeded()
-            }
+            presentPermissionOnboardingIfNeeded(trigger: .hotkeyAttempt)
             return false
         case .denied, .restricted:
             statusBarController?.showToolbarNotification(
                 NotificationMessage.micPermissionDenied
             )
+            presentPermissionOnboardingIfNeeded(trigger: .hotkeyAttempt)
             return false
         @unknown default:
             statusBarController?.showToolbarNotification(
                 NotificationMessage.micPermissionUnknown
             )
+            presentPermissionOnboardingIfNeeded(trigger: .hotkeyAttempt)
             return false
         }
 
@@ -716,20 +762,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func notifyMissingPermissionsOnHotkeyPressIfNeeded() -> Bool {
-        let accessibilityGranted = permissionsCoordinator.accessibilityGranted
-        let microphoneStatus = permissionsCoordinator.microphoneStatus
-        let microphoneGranted = microphoneStatus == .authorized
-        guard !accessibilityGranted || !microphoneGranted else {
+        permissionsCoordinator.refreshNow()
+        let snapshot = permissionsCoordinator.snapshot
+        guard hasMissingPermissions(snapshot) else {
             return false
         }
 
         statusBarController?.showToolbarNotification(NotificationMessage.permissionsMissing)
-
-        if microphoneStatus == .notDetermined {
-            Task { [weak self] in
-                _ = await self?.permissionsCoordinator.requestMicrophoneAccessIfNeeded()
-            }
-        }
+        presentPermissionOnboardingIfNeeded(trigger: .hotkeyAttempt)
 
         return true
     }

@@ -201,7 +201,7 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         )
         let accessibilityPermissionRow = makeSettingsRow(
             title: "Accessibility",
-            detail: "Required for global shortcut capture.",
+            detail: "Required for dictation keyboard shortcut to work.",
             control: makePermissionControl(
                 statusIndicator: accessibilityPermissionIndicator,
                 button: accessibilityPermissionButton
@@ -215,7 +215,7 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         )
         let microphonePermissionRow = makeSettingsRow(
             title: "Microphone",
-            detail: "Required for dictation audio capture.",
+            detail: "Required to capture your speech.",
             control: makePermissionControl(
                 statusIndicator: microphonePermissionIndicator,
                 button: microphonePermissionButton
