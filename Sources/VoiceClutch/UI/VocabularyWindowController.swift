@@ -218,7 +218,7 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
     private let vocabularyTableView = NSTableView(frame: .zero)
     private let tableScrollView = NSScrollView(frame: .zero)
     private let tableSummaryLabel = NSTextField(labelWithString: "0 pending, 0 saved")
-    private let emptyStateTitleLabel = NSTextField(labelWithString: "No vocabulary yet")
+    private let emptyStateTitleLabel = NSTextField(labelWithString: "Empty")
     private let emptyStateDetailLabel = NSTextField(
         wrappingLabelWithString: "Add the spelling you want, then the words or phrases you usually say.\nSuggestions will also appear here when VoiceClutch learns from your edits."
     )

@@ -1,12 +1,25 @@
 #!/bin/bash
 # Build script for VoiceClutch macOS app
-# Usage: ./build.sh [--production|-p]
+# Usage: ./build.sh [--production|-p] [--sign-identity "<Developer ID Application: Team (TEAMID)>"] [--notary-profile "<profile>"]
 
 set -e
+
+# Load local environment overrides (for signing/notarization secrets).
+if [ -f ".env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    source ".env"
+    set +a
+fi
 
 # Parse arguments
 CONFIGURATION="Debug"
 BUILD_FOR_PRODUCTION=false
+SIGN_IDENTITY="${VOICECLUTCH_SIGN_IDENTITY:-}"
+NOTARY_PROFILE="${VOICECLUTCH_NOTARY_PROFILE:-}"
+NOTARY_APPLE_ID="${VOICECLUTCH_APPLE_ID:-}"
+NOTARY_APP_PASSWORD="${VOICECLUTCH_APP_PASSWORD:-}"
+NOTARY_TEAM_ID="${VOICECLUTCH_TEAM_ID:-}"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -15,12 +28,48 @@ while [[ $# -gt 0 ]]; do
             BUILD_FOR_PRODUCTION=true
             shift
             ;;
+        --sign-identity)
+            if [ -z "${2:-}" ]; then
+                echo "Error: --sign-identity requires a value"
+                exit 1
+            fi
+            SIGN_IDENTITY="$2"
+            shift 2
+            ;;
+        --sign-identity=*)
+            SIGN_IDENTITY="${1#*=}"
+            shift
+            ;;
+        --notary-profile)
+            if [ -z "${2:-}" ]; then
+                echo "Error: --notary-profile requires a value"
+                exit 1
+            fi
+            NOTARY_PROFILE="$2"
+            shift 2
+            ;;
+        --notary-profile=*)
+            NOTARY_PROFILE="${1#*=}"
+            shift
+            ;;
         --help|-h)
-            echo "Usage: $0 [--production|-p]"
+            echo "Usage: $0 [--production|-p] [--sign-identity \"<Developer ID Application: Team (TEAMID)>\"] [--notary-profile \"<profile>\"]"
             echo ""
             echo "Options:"
             echo "  --production, -p    Build for production (Release configuration, no auto-launch)"
+            echo "  --sign-identity     Developer ID Application identity for codesign"
+            echo "  --notary-profile    notarytool keychain profile name (recommended)"
             echo "  --help, -h          Show this help message"
+            echo ""
+            echo "Environment variables:"
+            echo "  VOICECLUTCH_SIGN_IDENTITY"
+            echo "  VOICECLUTCH_NOTARY_PROFILE"
+            echo "  VOICECLUTCH_APPLE_ID"
+            echo "  VOICECLUTCH_APP_PASSWORD"
+            echo "  VOICECLUTCH_TEAM_ID"
+            echo ""
+            echo "Notes:"
+            echo "  If present, ./.env is loaded automatically before parsing arguments."
             exit 0
             ;;
         *)
@@ -46,6 +95,167 @@ PID_FILE="/tmp/voiceclutch-debug.pid"
 # Timestamp function matching app log format [HH:MM:SS.mmm]
 timestamp() {
     date +"[%H:%M:%S.%3N]"
+}
+
+fail() {
+    echo "Error: $1" >&2
+    exit 1
+}
+
+require_command() {
+    local cmd="$1"
+    if ! command -v "$cmd" >/dev/null 2>&1; then
+        fail "Required command not found: ${cmd}"
+    fi
+}
+
+validate_production_certification_requirements() {
+    if [ "$BUILD_FOR_PRODUCTION" != true ]; then
+        return
+    fi
+
+    if [ -z "$SIGN_IDENTITY" ]; then
+        fail "Production builds require signing identity. Pass --sign-identity or set VOICECLUTCH_SIGN_IDENTITY."
+    fi
+
+    require_command codesign
+    require_command spctl
+    require_command xcrun
+    require_command ditto
+
+    if ! xcrun --find notarytool >/dev/null 2>&1; then
+        fail "xcrun notarytool is not available. Install Xcode command line tools with notarization support."
+    fi
+
+    if ! xcrun --find stapler >/dev/null 2>&1; then
+        fail "xcrun stapler is not available. Install Xcode command line tools with stapler support."
+    fi
+
+    if [ -n "$NOTARY_PROFILE" ]; then
+        return
+    fi
+
+    local missing=()
+    if [ -z "$NOTARY_APPLE_ID" ]; then
+        missing+=("VOICECLUTCH_APPLE_ID")
+    fi
+    if [ -z "$NOTARY_APP_PASSWORD" ]; then
+        missing+=("VOICECLUTCH_APP_PASSWORD")
+    fi
+    if [ -z "$NOTARY_TEAM_ID" ]; then
+        missing+=("VOICECLUTCH_TEAM_ID")
+    fi
+
+    if [ "${#missing[@]}" -gt 0 ]; then
+        fail "Notarization credentials missing. Provide --notary-profile/VOICECLUTCH_NOTARY_PROFILE or set ${missing[*]}."
+    fi
+}
+
+sign_nested_code() {
+    local app_path="$1"
+    local target
+    local count=0
+
+    while IFS= read -r target; do
+        if [ -z "$target" ] || [ "$target" = "$app_path" ]; then
+            continue
+        fi
+
+        echo "🔏 Signing nested target: ${target}"
+        codesign \
+            --force \
+            --timestamp \
+            --sign "$SIGN_IDENTITY" \
+            "$target"
+        count=$((count + 1))
+    done < <(
+        find "$app_path" -depth \
+            \( \
+                -type d \( -name "*.framework" -o -name "*.app" -o -name "*.bundle" -o -name "*.xpc" \) \
+                -o -type f \( -name "*.dylib" -o -name "*.so" \) \
+            \) \
+            -print
+    )
+
+    echo "✅ Signed ${count} nested code target(s)"
+}
+
+verify_signing_and_gatekeeper() {
+    local app_path="$1"
+    local phase="$2"
+
+    echo "🔎 Verifying code signature (${phase})..."
+    codesign --verify --deep --strict --verbose=2 "$app_path"
+
+    echo "🛡️  Running Gatekeeper assessment (${phase})..."
+    spctl --assess --type execute --verbose=4 "$app_path"
+}
+
+notarize_and_staple() {
+    local app_path="$1"
+    local archive_path="$2"
+
+    mkdir -p "$(dirname "$archive_path")"
+    rm -f "$archive_path"
+
+    echo "📦 Creating notarization archive: ${archive_path}"
+    ditto -c -k --keepParent "$app_path" "$archive_path"
+
+    if [ -n "$NOTARY_PROFILE" ]; then
+        echo "📤 Submitting app for notarization with keychain profile '${NOTARY_PROFILE}'..."
+        xcrun notarytool submit "$archive_path" \
+            --keychain-profile "$NOTARY_PROFILE" \
+            --wait
+    else
+        echo "📤 Submitting app for notarization with Apple ID credentials from environment..."
+        xcrun notarytool submit "$archive_path" \
+            --apple-id "$NOTARY_APPLE_ID" \
+            --password "$NOTARY_APP_PASSWORD" \
+            --team-id "$NOTARY_TEAM_ID" \
+            --wait
+    fi
+
+    echo "📎 Stapling notarization ticket..."
+    xcrun stapler staple "$app_path"
+    xcrun stapler validate "$app_path"
+}
+
+certify_production_app_bundle() {
+    local app_path="$1"
+    local archive_dir=".build/notary"
+    local archive_path="${archive_dir}/${APP_NAME}-notarization.zip"
+    local app_abs_path
+    local archive_abs_path
+
+    echo "🔐 Starting production certification..."
+    echo "   Signing identity: ${SIGN_IDENTITY}"
+    if [ -n "$NOTARY_PROFILE" ]; then
+        echo "   Notarization auth: keychain profile (${NOTARY_PROFILE})"
+    else
+        echo "   Notarization auth: Apple ID environment credentials"
+    fi
+
+    sign_nested_code "$app_path"
+
+    echo "🔏 Signing app bundle with Hardened Runtime..."
+    codesign \
+        --deep \
+        --force \
+        --timestamp \
+        --options runtime \
+        --sign "$SIGN_IDENTITY" \
+        "$app_path"
+
+    verify_signing_and_gatekeeper "$app_path" "pre-notarization"
+    notarize_and_staple "$app_path" "$archive_path"
+    verify_signing_and_gatekeeper "$app_path" "post-stapling"
+
+    app_abs_path="$(cd "$(dirname "$app_path")" && pwd -P)/$(basename "$app_path")"
+    archive_abs_path="$(cd "$(dirname "$archive_path")" && pwd -P)/$(basename "$archive_path")"
+
+    echo "✅ Production app signed, notarized, and stapled."
+    echo "   App bundle: ${app_abs_path}"
+    echo "   Notarization archive: ${archive_abs_path}"
 }
 
 terminate_pid_gracefully() {
@@ -152,6 +362,8 @@ terminate_stale_debug_processes() {
         rm -f "$PID_FILE"
     fi
 }
+
+validate_production_certification_requirements
 
 if [ "$BUILD_FOR_PRODUCTION" = true ]; then
     echo "$(timestamp) 🔨 Building VoiceClutch (Release)"
@@ -345,9 +557,10 @@ echo ""
 echo "App bundle location: ${APP_BUNDLE}"
 
 if [ "$BUILD_FOR_PRODUCTION" = true ]; then
+    certify_production_app_bundle "${APP_BUNDLE}"
     echo ""
     echo "📦 Production bundle created."
-    echo "   The app is ready for distribution."
+    echo "   The app is ready for Developer ID distribution."
 else
     echo ""
     echo "🚀 Launching app in debug mode (logs will appear in terminal)..."

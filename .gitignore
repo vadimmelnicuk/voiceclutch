@@ -19,6 +19,9 @@ DerivedData/
 # Logs
 *.log
 
+# Local environment/secrets
+.env
+
 # AI
 .claude/
 backlog/

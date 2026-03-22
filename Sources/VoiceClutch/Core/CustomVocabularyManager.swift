@@ -277,7 +277,7 @@ final class CustomVocabularyManager: @unchecked Sendable {
         static func empty(now: Date = Date()) -> PersistedState {
             PersistedState(
                 schemaVersion: Self.currentSchemaVersion,
-                manualEntries: [],
+                manualEntries: CustomVocabularyManager.defaultManualEntries,
                 shortcutEntries: [],
                 learnedRules: [],
                 llmSuggestions: [],
@@ -313,6 +313,9 @@ final class CustomVocabularyManager: @unchecked Sendable {
     private static let legacyFileName = "custom-vocabulary.json"
     private static let fileName = "custom-vocabulary-v2.json"
     private static let maxSuggestionHistoryCount = 240
+    private static let defaultManualEntries: [ManualVocabularyEntry] = mergeManualEntries([
+        ManualVocabularyEntry(canonical: "VoiceClutch", aliases: ["voice clutch"])
+    ])
 
     private let lock = NSLock()
     private let logger = AppLogger(category: "CustomVocabularyManager")
