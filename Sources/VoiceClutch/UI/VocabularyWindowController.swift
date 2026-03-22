@@ -306,7 +306,8 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
         doneButton.translatesAutoresizingMaskIntoConstraints = false
         doneButton.bezelStyle = .rounded
         doneButton.keyEquivalent = "\r"
-        doneButton.heightAnchor.constraint(equalToConstant: doneButton.fittingSize.height).isActive = true
+        doneButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        doneButton.widthAnchor.constraint(equalToConstant: 100).isActive = true
 
         let importButton = makeFooterButton(title: "Import", action: #selector(importVocabulary))
         let exportButton = makeFooterButton(title: "Export", action: #selector(exportVocabulary))
@@ -339,17 +340,11 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
             tableCard.leadingAnchor.constraint(equalTo: contentStack.leadingAnchor),
             tableCard.trailingAnchor.constraint(equalTo: contentStack.trailingAnchor),
 
-            footerLinksStack.leadingAnchor.constraint(
-                equalTo: contentStack.leadingAnchor,
-                constant: Layout.cardContentInset
-            ),
+            footerLinksStack.leadingAnchor.constraint(equalTo: contentStack.leadingAnchor),
             footerLinksStack.centerYAnchor.constraint(equalTo: doneButton.centerYAnchor),
             footerLinksStack.trailingAnchor.constraint(lessThanOrEqualTo: doneButton.leadingAnchor, constant: -12),
 
-            doneButton.trailingAnchor.constraint(
-                equalTo: contentStack.trailingAnchor,
-                constant: -Layout.cardContentInset
-            ),
+            doneButton.trailingAnchor.constraint(equalTo: contentStack.trailingAnchor),
             doneButton.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -12)
         ])
 
@@ -361,7 +356,7 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
     }
 
     private func makeInputCard() -> NSView {
-        let titleLabel = NSTextField(labelWithString: "Add vocabulary")
+        let titleLabel = NSTextField(labelWithString: "Add new spelling")
         titleLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         titleLabel.alignment = .left
 
@@ -423,7 +418,7 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
     }
 
     private func makeTableCard() -> NSView {
-        let titleLabel = NSTextField(labelWithString: "Review vocabulary")
+        let titleLabel = NSTextField(labelWithString: "My spelling")
         titleLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         titleLabel.alignment = .left
 
@@ -782,8 +777,7 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
         let button = NSButton(title: title, target: self, action: action)
         button.translatesAutoresizingMaskIntoConstraints = false
         button.bezelStyle = .rounded
-        button.controlSize = .small
-        button.font = NSFont.systemFont(ofSize: 12)
+        button.heightAnchor.constraint(equalToConstant: button.fittingSize.height).isActive = true
         button.setContentHuggingPriority(.required, for: .horizontal)
         button.setContentCompressionResistancePriority(.required, for: .horizontal)
         return button
@@ -962,14 +956,14 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
             let approveButton = makeActionButton(
                 symbolName: "checkmark.circle.fill",
                 color: .systemGreen,
-                toolTip: "Save suggestion"
+                toolTip: "Save"
             ) {
                 self.approveSuggestion(at: index)
             }
             let dismissButton = makeActionButton(
                 symbolName: "xmark.circle.fill",
                 color: .secondaryLabelColor,
-                toolTip: "Dismiss suggestion"
+                toolTip: "Dismiss"
             ) {
                 self.removeRow(at: index)
             }

@@ -293,6 +293,14 @@ for icon_file in "${ICON_FILES[@]}"; do
     fi
 done
 
+# Copy GitHub icon used in Preferences footer button
+GITHUB_ICON_FILE="GitHub_Invertocat_White_Clearspace.svg"
+if [ -f "Resources/${GITHUB_ICON_FILE}" ]; then
+    cp "Resources/${GITHUB_ICON_FILE}" "${APP_BUNDLE}/Contents/Resources/${GITHUB_ICON_FILE}"
+else
+    echo "⚠️  Warning: GitHub icon asset not found (Resources/${GITHUB_ICON_FILE})"
+fi
+
 # Copy app icon
 if [ -f "Resources/VoiceClutch.png" ]; then
     cp "Resources/VoiceClutch.png" "${APP_BUNDLE}/Contents/Resources/VoiceClutch.png"

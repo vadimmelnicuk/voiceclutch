@@ -60,6 +60,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var hasDismissedPermissionOnboardingWhileMissingPermissions = false
     private var hasShownPermissionOnboardingReminderThisSession = false
     private var wasFullyReadyForUse = false
+    private var didRequireOnboardingTasksThisLaunch = false
+    private var hasShownReadyNotificationForOnboarding =
+        UserDefaults.standard.bool(forKey: UserDefaultsKey.hasShownReadyNotificationForOnboarding)
 
     private enum NotificationMessage {
         static let hotkeyActivationReady = "Listening shortcut is active"
@@ -73,6 +76,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         static let micPermissionUnknown = "Microphone permission status is unknown"
     }
 
+    private enum UserDefaultsKey {
+        static let hasShownReadyNotificationForOnboarding =
+            "com.voiceclutch.hasShownReadyNotificationForOnboarding"
+    }
+
     // MARK: - Lifecycle
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide dock icon (LSUIElement behavior)
@@ -81,9 +89,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupStatusBar()
         setupCorrectionLearning()
         setupDictationController()
-        if !dictationController.areModelsInstalled() {
+        let modelsInstalledAtLaunch = dictationController.areModelsInstalled()
+        if !modelsInstalledAtLaunch {
             dictationController.setState(.loadingModel)
         }
+        didRequireOnboardingTasksThisLaunch = !modelsInstalledAtLaunch
         setupStateObserving()
         setupMemoryPressureMonitoring()
         setupPermissionMonitoring()
@@ -169,6 +179,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let isFullyReady = !hasMissingPermissions(snapshot) && dictationController.isReady
         defer { wasFullyReadyForUse = isFullyReady }
         guard isFullyReady, !wasFullyReadyForUse else { return }
+        guard didRequireOnboardingTasksThisLaunch, !hasShownReadyNotificationForOnboarding else { return }
+        hasShownReadyNotificationForOnboarding = true
+        UserDefaults.standard.set(true, forKey: UserDefaultsKey.hasShownReadyNotificationForOnboarding)
         showDownloadCompleteNotification()
     }
 
@@ -451,7 +464,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func runInitialPermissionOnboardingIfNeeded() {
         permissionsCoordinator.refreshNow()
         let snapshot = permissionsCoordinator.snapshot
-        guard hasMissingPermissions(snapshot) else {
+        let missingPermissions = hasMissingPermissions(snapshot)
+        didRequireOnboardingTasksThisLaunch = didRequireOnboardingTasksThisLaunch || missingPermissions
+        guard missingPermissions else {
             ensureHotkeyRegistered(showFailureNotification: true)
             return
         }

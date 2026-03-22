@@ -9,11 +9,19 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         static let contentHeight: CGFloat = 640
         static let rowHeight: CGFloat = 52
         static let interactionRowHeight: CGFloat = 68
+        static let projectPageURL = "https://github.com/vadimmelnicuk/voiceclutch"
+        static let gitHubIconFileName = "GitHub_Invertocat_White_Clearspace.svg"
     }
 
     private enum CustomShortcutCapture {
         static let escapeKeyCode: UInt16 = 53
         static let completedResponse = NSApplication.ModalResponse(rawValue: 2_001)
+    }
+
+    private struct AcknowledgementEntry {
+        let title: String
+        let url: String
+        let description: String
     }
 
     private let onShortcutChanged: @MainActor (ListeningShortcut) -> Void
@@ -40,6 +48,28 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private var capturedShortcutCodes = Set<UInt32>()
     private var isCapturingCustomShortcut = false
     private var shouldRestoreAccessoryActivationPolicy = false
+    private let acknowledgementEntries: [AcknowledgementEntry] = [
+        .init(
+            title: "FluidInference Nvidia Nemotron Speech Streaming 0.6b CoreML",
+            url: "https://huggingface.co/FluidInference/nemotron-speech-streaming-en-0.6b-coreml",
+            description: "An on-device streaming ASR model used by VoiceClutch for low-latency speech-to-text dictation."
+        ),
+        .init(
+            title: "LFM2.5-1.2B-Instruct-MLX-4bit",
+            url: "https://huggingface.co/lmstudio-community/LFM2.5-1.2B-Instruct-MLX-4bit",
+            description: "A compact MLX instruction model used by VoiceClutch for local transcript cleanup and optional smart-formatting passes."
+        ),
+        .init(
+            title: "mlx-swift-lm",
+            url: "https://github.com/ml-explore/mlx-swift-lm",
+            description: "Swift tooling for loading and running MLX language models. VoiceClutch relies on it to execute local LLM inference."
+        ),
+        .init(
+            title: "Apple Frameworks",
+            url: "https://developer.apple.com/documentation",
+            description: "CoreAudio handles audio I/O, AVFoundation coordinates media capture, CoreML runs model inference, CoreGraphics supports rendering primitives, and AppKit powers the native macOS interface."
+        )
+    ]
     private let listeningShortcutMenuItems: [ListeningShortcut] = [
         .leftOption,
         .rightOption,
@@ -284,10 +314,41 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         doneButton.translatesAutoresizingMaskIntoConstraints = false
         doneButton.bezelStyle = .rounded
         doneButton.keyEquivalent = "\r"
-        doneButton.heightAnchor.constraint(equalToConstant: doneButton.fittingSize.height).isActive = true
+        let footerButtonHeight: CGFloat = 28
+        doneButton.heightAnchor.constraint(equalToConstant: footerButtonHeight).isActive = true
+
+        let githubButton = NSButton(title: "", target: self, action: #selector(openGitHubProjectPage))
+        githubButton.translatesAutoresizingMaskIntoConstraints = false
+        githubButton.bezelStyle = .rounded
+        githubButton.toolTip = "GitHub"
+        githubButton.heightAnchor.constraint(equalToConstant: footerButtonHeight).isActive = true
+        githubButton.widthAnchor.constraint(equalTo: githubButton.heightAnchor).isActive = true
+        if let githubImage = Self.loadGitHubIconImage() {
+            githubButton.image = githubImage
+            githubButton.imagePosition = .imageOnly
+            githubButton.imageScaling = .scaleProportionallyUpOrDown
+        } else {
+            githubButton.title = "GitHub"
+        }
+
+        let acknowledgementsButton = NSButton(
+            title: "Acknowledgements",
+            target: self,
+            action: #selector(showAcknowledgementsOverlay)
+        )
+        acknowledgementsButton.translatesAutoresizingMaskIntoConstraints = false
+        acknowledgementsButton.bezelStyle = .rounded
+
+        let footerLeftButtons = NSStackView(views: [githubButton, acknowledgementsButton])
+        footerLeftButtons.translatesAutoresizingMaskIntoConstraints = false
+        footerLeftButtons.orientation = .horizontal
+        footerLeftButtons.alignment = .centerY
+        footerLeftButtons.distribution = .fill
+        footerLeftButtons.spacing = 8
 
         contentView.addSubview(panel)
         panel.addSubview(groupsStack)
+        panel.addSubview(footerLeftButtons)
         panel.addSubview(doneButton)
 
         NSLayoutConstraint.activate([
@@ -300,8 +361,12 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
             groupsStack.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 16),
             groupsStack.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -16),
 
+            footerLeftButtons.leadingAnchor.constraint(equalTo: groupsStack.leadingAnchor),
+            footerLeftButtons.trailingAnchor.constraint(lessThanOrEqualTo: doneButton.leadingAnchor, constant: -8),
+            footerLeftButtons.centerYAnchor.constraint(equalTo: doneButton.centerYAnchor),
             doneButton.topAnchor.constraint(equalTo: groupsStack.bottomAnchor, constant: 10),
-            doneButton.trailingAnchor.constraint(equalTo: groupsStack.trailingAnchor, constant: -16),
+            doneButton.leadingAnchor.constraint(equalTo: microphonePermissionIndicator.leadingAnchor),
+            doneButton.trailingAnchor.constraint(equalTo: groupsStack.trailingAnchor),
             doneButton.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -12)
         ])
 
@@ -323,6 +388,35 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         )
 
         window.setFrame(NSRect(origin: origin, size: targetFrame.size), display: false)
+    }
+
+    private static func loadGitHubIconImage() -> NSImage? {
+        let executableDirectory = URL(fileURLWithPath: CommandLine.arguments[0], isDirectory: false)
+            .deletingLastPathComponent()
+        let projectRootFromBuildOutput = executableDirectory
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let searchDirectories: [URL?] = [
+            Bundle.main.resourceURL,
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+                .appendingPathComponent("Resources", isDirectory: true),
+            executableDirectory
+                .appendingPathComponent("Resources", isDirectory: true),
+            projectRootFromBuildOutput
+                .appendingPathComponent("Resources", isDirectory: true),
+        ]
+
+        for directory in searchDirectories.compactMap({ $0 }) {
+            let fileURL = directory.appendingPathComponent(Layout.gitHubIconFileName)
+            if let image = NSImage(contentsOf: fileURL) {
+                image.size = NSSize(width: 18, height: 18)
+                image.isTemplate = false
+                return image
+            }
+        }
+
+        return nil
     }
 
     private func makeSettingsRow(
@@ -910,6 +1004,132 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         alert.alertStyle = .informational
         alert.addButton(withTitle: "OK")
         alert.beginSheetModal(for: window)
+    }
+
+    @objc private func openGitHubProjectPage() {
+        guard let url = URL(string: Layout.projectPageURL) else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func showAcknowledgementsOverlay() {
+        guard let window = window else { return }
+
+        let alert = NSAlert()
+        alert.messageText = ""
+        alert.alertStyle = .informational
+        alert.accessoryView = makeAcknowledgementsAccessoryView()
+        let closeButton = alert.addButton(withTitle: "Close")
+        closeButton.keyEquivalent = "\r"
+        alert.beginSheetModal(for: window)
+    }
+
+    private func makeAcknowledgementsAccessoryView() -> NSView {
+        let contentWidth: CGFloat = 430
+        let horizontalInset: CGFloat = 6
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: contentWidth, height: 0))
+
+        let headingLabel = NSTextField(labelWithString: "Acknowledgements")
+        headingLabel.translatesAutoresizingMaskIntoConstraints = false
+        headingLabel.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
+        headingLabel.textColor = .labelColor
+        headingLabel.alignment = .left
+
+        let itemsStack = NSStackView()
+        itemsStack.translatesAutoresizingMaskIntoConstraints = false
+        itemsStack.orientation = .vertical
+        itemsStack.alignment = .leading
+        itemsStack.distribution = .fill
+        itemsStack.spacing = 0
+        container.addSubview(headingLabel)
+        container.addSubview(itemsStack)
+
+        for (index, entry) in acknowledgementEntries.enumerated() {
+            let row = makeAcknowledgementRow(entry)
+            itemsStack.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: itemsStack.widthAnchor).isActive = true
+
+            if index < acknowledgementEntries.count - 1 {
+                let separator = NSView()
+                separator.translatesAutoresizingMaskIntoConstraints = false
+                separator.wantsLayer = true
+                separator.layer?.backgroundColor = settingsSeparatorColor().cgColor
+                separator.heightAnchor.constraint(
+                    equalToConstant: 1 / max(NSScreen.main?.backingScaleFactor ?? 2, 1)
+                ).isActive = true
+                itemsStack.addArrangedSubview(separator)
+                separator.widthAnchor.constraint(equalTo: itemsStack.widthAnchor).isActive = true
+            }
+        }
+        NSLayoutConstraint.activate([
+            headingLabel.topAnchor.constraint(equalTo: container.topAnchor),
+            headingLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: horizontalInset),
+            headingLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -horizontalInset),
+
+            itemsStack.topAnchor.constraint(equalTo: headingLabel.bottomAnchor, constant: 8),
+            itemsStack.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: horizontalInset),
+            itemsStack.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -horizontalInset),
+            itemsStack.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
+
+        container.layoutSubtreeIfNeeded()
+        container.frame.size = NSSize(width: contentWidth, height: ceil(container.fittingSize.height))
+        return container
+    }
+
+    private func makeAcknowledgementRow(_ entry: AcknowledgementEntry) -> NSView {
+        let row = NSView()
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        let titleField = NSTextField(labelWithString: "")
+        titleField.translatesAutoresizingMaskIntoConstraints = false
+        titleField.allowsEditingTextAttributes = true
+        titleField.isSelectable = true
+        titleField.maximumNumberOfLines = 0
+        titleField.lineBreakMode = .byWordWrapping
+        titleField.alignment = .left
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .left
+
+        let titleAttributes: [NSAttributedString.Key: Any]
+        if let url = URL(string: entry.url) {
+            titleAttributes = [
+                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+                .foregroundColor: NSColor.linkColor,
+                .underlineStyle: NSUnderlineStyle.single.rawValue,
+                .link: url,
+                .paragraphStyle: paragraph
+            ]
+        } else {
+            titleAttributes = [
+                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
+                .foregroundColor: NSColor.labelColor,
+                .paragraphStyle: paragraph
+            ]
+        }
+        titleField.attributedStringValue = NSAttributedString(string: entry.title, attributes: titleAttributes)
+
+        let descriptionField = NSTextField(wrappingLabelWithString: entry.description)
+        descriptionField.translatesAutoresizingMaskIntoConstraints = false
+        descriptionField.font = NSFont.systemFont(ofSize: 12)
+        descriptionField.textColor = .secondaryLabelColor
+        descriptionField.maximumNumberOfLines = 0
+        descriptionField.lineBreakMode = .byWordWrapping
+        descriptionField.alignment = .left
+
+        row.addSubview(titleField)
+        row.addSubview(descriptionField)
+        NSLayoutConstraint.activate([
+            titleField.topAnchor.constraint(equalTo: row.topAnchor, constant: 8),
+            titleField.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            titleField.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+
+            descriptionField.topAnchor.constraint(equalTo: titleField.bottomAnchor, constant: 2),
+            descriptionField.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            descriptionField.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            descriptionField.bottomAnchor.constraint(equalTo: row.bottomAnchor, constant: -8)
+        ])
+        return row
     }
 
     @objc private func manageVocabulary() {
