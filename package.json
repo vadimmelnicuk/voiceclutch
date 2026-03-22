@@ -1,0 +1,8 @@
+{
+  "name": "voiceclutch",
+  "version": "0.1.0",
+  "scripts": {
+    "build:debug": "./Scripts/build.sh",
+    "build:production": "./Scripts/build.sh --production"
+  }
+}

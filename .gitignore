@@ -1,0 +1,28 @@
+# Swift Package Manager
+.swiftpm/
+.build/
+*.dylib
+*.dSYM/
+
+# Xcode
+*.xcworkspace/
+xcuserdata/
+DerivedData/
+
+# macOS
+.DS_Store
+
+# Build artifacts
+*.app
+*.dmg
+
+# Logs
+*.log
+
+# AI
+.claude/
+CLAUDE.md
+features.md
+
+# VSCode
+.vscode/

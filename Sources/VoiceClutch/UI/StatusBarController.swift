@@ -1,0 +1,329 @@
+import AppKit
+import QuartzCore
+
+@MainActor
+class StatusBarController: NSObject {
+    private var statusItem: NSStatusItem
+    private var menu: NSMenu
+    private let preferencesWindowController: PreferencesWindowController
+    private let toolbarIcon: NSImage?
+    private let activeListeningToolbarIcon: NSImage?
+    private var isShowingActiveListeningIcon: Bool?
+    private var previousState: VoiceClutchState?
+    private var notificationPopover: NSPopover?
+    private var notificationDismissWorkItem: DispatchWorkItem?
+
+    init(onShortcutChanged: @escaping @MainActor (ListeningShortcut) -> Void) {
+        // Use a square status item when showing an icon.
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+
+        // Setup menu
+        menu = NSMenu()
+        preferencesWindowController = PreferencesWindowController(onShortcutChanged: onShortcutChanged)
+        toolbarIcon = Self.loadToolbarIcon()
+        activeListeningToolbarIcon = toolbarIcon.flatMap {
+            Self.maskedToolbarIcon(from: $0, color: NSColor(srgbRed: 1.0, green: 0.6, blue: 0.0, alpha: 1.0))
+        }
+
+        super.init()
+
+        setupMenu()
+        updateIcon(for: .idle)
+    }
+
+    private func setupMenu() {
+        // Title item (disabled)
+        let titleItem = NSMenuItem(
+            title: "VoiceClutch",
+            action: nil,
+            keyEquivalent: ""
+        )
+        titleItem.isEnabled = false
+        menu.addItem(titleItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // Status item (disabled, shows current state)
+        let statusItem = NSMenuItem(
+            title: "Ready",
+            action: nil,
+            keyEquivalent: ""
+        )
+        statusItem.isEnabled = false
+        menu.addItem(statusItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // Preferences
+        let prefsItem = NSMenuItem(
+            title: "Preferences",
+            action: #selector(showPreferences),
+            keyEquivalent: ""
+        )
+        prefsItem.target = self
+        menu.addItem(prefsItem)
+
+        menu.addItem(NSMenuItem.separator())
+
+        // Quit
+        let quitItem = NSMenuItem(
+            title: "Quit",
+            action: #selector(quit),
+            keyEquivalent: "q"
+        )
+        quitItem.target = self
+        menu.addItem(quitItem)
+
+        self.statusItem.menu = menu
+    }
+
+    // MARK: - Icon & Menu Updates
+
+    func updateIcon(for state: VoiceClutchState) {
+        guard let button = statusItem.button else { return }
+
+        if let toolbarIcon {
+            button.title = ""
+            button.imagePosition = .imageOnly
+
+            let wantsActiveListeningIcon = state == .recording
+            let targetImage = wantsActiveListeningIcon
+                ? (activeListeningToolbarIcon ?? toolbarIcon)
+                : toolbarIcon
+            let shouldAnimateTransition = activeListeningToolbarIcon != nil &&
+                isShowingActiveListeningIcon != nil &&
+                isShowingActiveListeningIcon != wantsActiveListeningIcon
+            setToolbarButtonImage(targetImage, on: button, animated: shouldAnimateTransition)
+            isShowingActiveListeningIcon = wantsActiveListeningIcon
+        } else {
+            isShowingActiveListeningIcon = nil
+            button.image = nil
+            button.imagePosition = .noImage
+            button.title = fallbackEmoji(for: state)
+        }
+
+        applyToolbarOpacity(for: state, on: button)
+        previousState = state
+        button.toolTip = tooltip(for: state)
+    }
+
+    func updateMenu(for state: VoiceClutchState) {
+        // The status item is at index 2 (0 = title, 1 = separator, 2 = status)
+        guard menu.numberOfItems > 2,
+              let statusItem = menu.item(at: 2) else { return }
+
+        switch state {
+        case .idle:
+            statusItem.title = "Ready"
+        case .recording:
+            statusItem.title = "Recording"
+        case .processing:
+            statusItem.title = "Processing"
+        case .downloading:
+            statusItem.title = "Downloading"
+        case .loadingModel:
+            statusItem.title = "Loading model"
+        }
+    }
+
+    func updateDownloadProgress(_ progress: Double) {
+        // The status item is at index 2 (0 = title, 1 = separator, 2 = status)
+        guard menu.numberOfItems > 2,
+              let statusItem = menu.item(at: 2) else { return }
+
+        let progressPercent = Int(progress * 100)
+        statusItem.title = "Downloading \(progressPercent)%"
+    }
+
+    func showToolbarNotification(_ message: String, duration: TimeInterval = 3.0) {
+        guard let button = statusItem.button else { return }
+
+        notificationDismissWorkItem?.cancel()
+        notificationPopover?.close()
+
+        let popover = NSPopover()
+        popover.behavior = .applicationDefined
+        popover.animates = true
+        let viewController = makeNotificationViewController(message: message)
+        popover.contentViewController = viewController
+        popover.contentSize = viewController.view.fittingSize
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
+
+        notificationPopover = popover
+
+        let dismissWorkItem = DispatchWorkItem { [weak self] in
+            self?.notificationPopover?.close()
+            self?.notificationPopover = nil
+            self?.notificationDismissWorkItem = nil
+        }
+        notificationDismissWorkItem = dismissWorkItem
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: dismissWorkItem)
+    }
+
+    private func makeNotificationViewController(message: String) -> NSViewController {
+        let horizontalPadding: CGFloat = 12
+        let verticalPadding: CGFloat = 10
+
+        let label = NSTextField(labelWithString: message)
+        label.font = NSFont.systemFont(ofSize: 12)
+        label.textColor = .labelColor
+        label.alignment = .center
+        label.maximumNumberOfLines = 1
+        label.lineBreakMode = .byClipping
+        label.translatesAutoresizingMaskIntoConstraints = false
+
+        let labelSize = label.intrinsicContentSize
+        let containerSize = NSSize(
+            width: ceil(labelSize.width + (horizontalPadding * 2)),
+            height: ceil(labelSize.height + (verticalPadding * 2))
+        )
+
+        let container = NSView(frame: NSRect(origin: .zero, size: containerSize))
+        container.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(label)
+
+        NSLayoutConstraint.activate([
+            label.topAnchor.constraint(equalTo: container.topAnchor, constant: verticalPadding),
+            label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: horizontalPadding),
+            label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -horizontalPadding),
+            label.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -verticalPadding)
+        ])
+
+        let viewController = NSViewController()
+        viewController.view = container
+        viewController.preferredContentSize = containerSize
+        return viewController
+    }
+
+    // MARK: - Actions
+
+    @objc private func showPreferences() {
+        preferencesWindowController.showWindow()
+    }
+
+    @objc private func quit() {
+        NSApplication.shared.terminate(nil)
+    }
+
+    private static func loadToolbarIcon() -> NSImage? {
+        let iconFileNames = [
+            "logo@1x.png",
+            "logo@2x.png",
+            "logo@3x.png",
+        ]
+
+        let executableDirectory = URL(fileURLWithPath: CommandLine.arguments[0], isDirectory: false)
+            .deletingLastPathComponent()
+        let projectRootFromBuildOutput = executableDirectory
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let searchDirectories: [URL?] = [
+            Bundle.main.resourceURL?.appendingPathComponent("Assets", isDirectory: true),
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+                .appendingPathComponent("Assets", isDirectory: true),
+            executableDirectory.appendingPathComponent("Assets", isDirectory: true),
+            projectRootFromBuildOutput.appendingPathComponent("Assets", isDirectory: true),
+        ]
+
+        for directory in searchDirectories.compactMap({ $0 }) {
+            let image = NSImage(size: NSSize(width: 18, height: 18))
+            var hasRepresentation = false
+
+            for fileName in iconFileNames {
+                let fileURL = directory.appendingPathComponent(fileName)
+                if let sourceImage = NSImage(contentsOf: fileURL) {
+                    for representation in sourceImage.representations {
+                        image.addRepresentation(representation)
+                    }
+                    hasRepresentation = true
+                }
+            }
+
+            if hasRepresentation {
+                image.size = NSSize(width: 18, height: 18)
+                image.isTemplate = false
+                return image
+            }
+        }
+
+        return nil
+    }
+
+    private static func maskedToolbarIcon(from sourceImage: NSImage, color: NSColor) -> NSImage? {
+        let imageSize = sourceImage.size.width > 0 && sourceImage.size.height > 0
+            ? sourceImage.size
+            : NSSize(width: 18, height: 18)
+        let rect = NSRect(origin: .zero, size: imageSize)
+
+        let tintedImage = NSImage(size: imageSize)
+        tintedImage.lockFocus()
+        color.setFill()
+        rect.fill()
+        sourceImage.draw(in: rect, from: .zero, operation: .destinationIn, fraction: 1.0)
+        tintedImage.unlockFocus()
+        tintedImage.isTemplate = false
+        return tintedImage
+    }
+
+    private func setToolbarButtonImage(_ image: NSImage, on button: NSStatusBarButton, animated: Bool) {
+        guard animated else {
+            button.image = image
+            return
+        }
+
+        button.wantsLayer = true
+        if let layer = button.layer {
+            let fade = CATransition()
+            fade.type = .fade
+            fade.duration = 0.3
+            fade.timingFunction = CAMediaTimingFunction(controlPoints: 0.42, 0.0, 0.58, 1.0)
+            layer.add(fade, forKey: "voiceclutchToolbarIconFade")
+        }
+
+        button.image = image
+    }
+
+    private func applyToolbarOpacity(for state: VoiceClutchState, on button: NSStatusBarButton) {
+        let targetOpacity: CGFloat = state == .loadingModel ? 0.5 : 1.0
+        let wasLoadingModel = previousState == .loadingModel
+        let isExitingLoadingModel = wasLoadingModel && state != .loadingModel
+
+        if isExitingLoadingModel {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.25
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                button.animator().alphaValue = targetOpacity
+            }
+        } else {
+            button.alphaValue = targetOpacity
+        }
+    }
+
+    private func fallbackEmoji(for state: VoiceClutchState) -> String {
+        switch state {
+        case .idle, .downloading, .loadingModel:
+            return "⚫"
+        case .recording:
+            return "🔴"
+        case .processing:
+            return "🔵"
+        }
+    }
+
+    private func tooltip(for state: VoiceClutchState) -> String {
+        switch state {
+        case .idle:
+            return "VoiceClutch: Ready"
+        case .recording:
+            return "VoiceClutch: Recording"
+        case .processing:
+            return "VoiceClutch: Processing"
+        case .downloading:
+            return "VoiceClutch: Downloading"
+        case .loadingModel:
+            return "VoiceClutch: Loading model"
+        }
+    }
+}
