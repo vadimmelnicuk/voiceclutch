@@ -1,6 +1,6 @@
 # VoiceClutch
 
-<img src="Resources/VoiceClutch.png" alt="VoiceClutch" style="max-width: 200px;" />
+<img src="Resources/VoiceClutch.png" alt="VoiceClutch" width="200" />
 
 Private, on-device voice dictation for macOS with low-latency streaming transcription and LLM-powered corrections.
 
