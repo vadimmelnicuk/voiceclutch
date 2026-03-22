@@ -2,6 +2,7 @@ import Foundation
 
 extension Notification.Name {
     static let customVocabularyDidChange = Notification.Name("dev.vm.voiceclutch.customVocabularyDidChange")
+    static let customVocabularySuggestionAdded = Notification.Name("dev.vm.voiceclutch.customVocabularySuggestionAdded")
 }
 
 struct ManualVocabularyEntry: Codable, Hashable, Sendable {
@@ -178,6 +179,11 @@ enum CustomVocabularyError: LocalizedError {
 
 final class CustomVocabularyManager: @unchecked Sendable {
     static let shared = CustomVocabularyManager()
+
+    enum NotificationUserInfoKey {
+        static let source = "source"
+        static let target = "target"
+    }
 
     private struct PortableVocabularyDocument: Codable {
         static let currentSchemaVersion = 1
@@ -740,6 +746,78 @@ final class CustomVocabularyManager: @unchecked Sendable {
     }
 
     @discardableResult
+    func recordUserEditSuggestion(source: String, target: String) -> CustomVocabularySnapshot {
+        guard AutoAddCorrectionsPreference.load() else {
+            return snapshot()
+        }
+
+        let sanitizedSource = Self.sanitizedTerm(source)
+        let sanitizedTarget = Self.sanitizedTerm(target)
+        let normalizedSource = Self.normalizedLookupKey(sanitizedSource)
+        let normalizedTarget = Self.normalizedLookupKey(sanitizedTarget)
+        guard
+            !sanitizedSource.isEmpty,
+            !sanitizedTarget.isEmpty,
+            !normalizedSource.isEmpty,
+            !normalizedTarget.isEmpty,
+            normalizedSource != normalizedTarget
+        else {
+            return snapshot()
+        }
+
+        var didPersist = false
+
+        do {
+            let snapshot = try mutateState { state in
+                let targetStatus = Self.targetTermStatus(for: sanitizedTarget, state: state)
+                guard targetStatus != .existing else {
+                    return
+                }
+
+                guard !state.llmSuggestions.contains(where: {
+                    $0.status == .pending && $0.normalizedTarget == normalizedTarget
+                }) else {
+                    return
+                }
+
+                let now = Date()
+                trimSuggestionHistory(in: &state, now: now)
+                state.llmSuggestions.append(
+                    LLMVocabularySuggestion(
+                        source: sanitizedSource,
+                        target: sanitizedTarget,
+                        evidence: .userEdit,
+                        confidence: 0.99,
+                        targetTermStatus: targetStatus,
+                        status: .pending,
+                        normalizedSource: normalizedSource,
+                        normalizedTarget: normalizedTarget,
+                        createdAt: now,
+                        updatedAt: now
+                    )
+                )
+                trimSuggestionHistory(in: &state, now: now)
+                didPersist = true
+            }
+
+            if didPersist {
+                NotificationCenter.default.post(
+                    name: .customVocabularySuggestionAdded,
+                    object: nil,
+                    userInfo: [
+                        NotificationUserInfoKey.source: sanitizedSource,
+                        NotificationUserInfoKey.target: sanitizedTarget,
+                    ]
+                )
+            }
+            return snapshot
+        } catch {
+            logger.warning("Failed to persist manual-edit suggestion: \(error.localizedDescription)")
+            return snapshot()
+        }
+    }
+
+    @discardableResult
     func upsertLearnedRule(
         source: String,
         target: String
@@ -1146,6 +1224,21 @@ final class CustomVocabularyManager: @unchecked Sendable {
         return .new
     }
 
+    func hasLearnedRule(source: String, target: String) -> Bool {
+        let normalizedSource = Self.normalizedLookupKey(source)
+        let normalizedTarget = Self.normalizedLookupKey(target)
+        guard !normalizedSource.isEmpty, !normalizedTarget.isEmpty else {
+            return false
+        }
+
+        lock.lock()
+        defer { lock.unlock() }
+        return state.learnedRules.contains { rule in
+            Self.normalizedLookupKey(rule.source) == normalizedSource &&
+                Self.normalizedLookupKey(rule.target) == normalizedTarget
+        }
+    }
+
     static func mergedManualEntries(
         existing: [ManualVocabularyEntry],
         additions: [ManualVocabularyEntry]
@@ -1210,6 +1303,35 @@ final class CustomVocabularyManager: @unchecked Sendable {
             learnedRules: sortedLearnedRules,
             pendingSuggestions: pendingSuggestions
         )
+    }
+
+    private static func targetTermStatus(
+        for target: String,
+        state: PersistedState
+    ) -> LLMSuggestionTargetTermStatus {
+        let normalizedTarget = normalizedLookupKey(target)
+        guard !normalizedTarget.isEmpty else {
+            return .new
+        }
+
+        for entry in state.manualEntries {
+            if normalizedLookupKey(entry.canonical) == normalizedTarget {
+                return .existing
+            }
+            if entry.aliases.contains(where: { normalizedLookupKey($0) == normalizedTarget }) {
+                return .existing
+            }
+        }
+
+        if state.shortcutEntries.contains(where: { normalizedLookupKey($0.replacement) == normalizedTarget }) {
+            return .existing
+        }
+
+        if state.learnedRules.contains(where: { normalizedLookupKey($0.target) == normalizedTarget }) {
+            return .existing
+        }
+
+        return .new
     }
 
     private func loadState() -> PersistedState {

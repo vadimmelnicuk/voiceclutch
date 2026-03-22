@@ -21,6 +21,7 @@ DerivedData/
 
 # AI
 .claude/
+backlog/
 CLAUDE.md
 AGENTS.md
 features.md

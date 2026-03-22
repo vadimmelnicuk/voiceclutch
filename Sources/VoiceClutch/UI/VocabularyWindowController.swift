@@ -305,9 +305,11 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
         let doneButton = NSButton(title: "Done", target: self, action: #selector(closeWindow))
         doneButton.translatesAutoresizingMaskIntoConstraints = false
         doneButton.bezelStyle = .rounded
+        doneButton.keyEquivalent = "\r"
+        doneButton.heightAnchor.constraint(equalToConstant: doneButton.fittingSize.height).isActive = true
 
-        let importButton = makeFooterLinkButton(title: "Import", action: #selector(importVocabulary))
-        let exportButton = makeFooterLinkButton(title: "Export", action: #selector(exportVocabulary))
+        let importButton = makeFooterButton(title: "Import", action: #selector(importVocabulary))
+        let exportButton = makeFooterButton(title: "Export", action: #selector(exportVocabulary))
         let footerLinksStack = NSStackView(views: [importButton, exportButton])
         footerLinksStack.translatesAutoresizingMaskIntoConstraints = false
         footerLinksStack.orientation = .horizontal
@@ -776,20 +778,14 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
         alert.beginSheetModal(for: window)
     }
 
-    private func makeFooterLinkButton(title: String, action: Selector) -> NSButton {
+    private func makeFooterButton(title: String, action: Selector) -> NSButton {
         let button = NSButton(title: title, target: self, action: action)
         button.translatesAutoresizingMaskIntoConstraints = false
-        button.isBordered = false
-        button.bezelStyle = .inline
-        button.font = NSFont.systemFont(ofSize: 12, weight: .medium)
-        button.contentTintColor = .linkColor
-        button.setButtonType(.momentaryPushIn)
-        let titleAttributes: [NSAttributedString.Key: Any] = [
-            .foregroundColor: NSColor.linkColor,
-            .underlineStyle: NSUnderlineStyle.single.rawValue,
-            .font: NSFont.systemFont(ofSize: 12, weight: .medium)
-        ]
-        button.attributedTitle = NSAttributedString(string: title, attributes: titleAttributes)
+        button.bezelStyle = .rounded
+        button.controlSize = .small
+        button.font = NSFont.systemFont(ofSize: 12)
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        button.setContentCompressionResistancePriority(.required, for: .horizontal)
         return button
     }
 

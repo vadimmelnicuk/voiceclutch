@@ -470,7 +470,7 @@ final class CustomVocabularyManagerSuggestionLifecycleTests: XCTestCase {
     }
 }
 
-final class VocabularySuggestionOrchestratorTests: XCTestCase {
+final class UserEditSuggestionCaptureTests: XCTestCase {
     private func makeManager() -> CustomVocabularyManager {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -479,18 +479,17 @@ final class VocabularySuggestionOrchestratorTests: XCTestCase {
         return CustomVocabularyManager(storageURL: storageURL, legacyStorageURL: legacyURL)
     }
 
-    func testOrchestrator_userEditSignalCreatesSinglePendingSuggestion() async {
+    func testRecordUserEditSuggestion_createsSinglePendingSuggestion() {
         let manager = makeManager()
-        let orchestrator = VocabularySuggestionOrchestrator(
-            vocabularyManager: manager,
-            isAutoCorrectionsEnabled: { true }
-        )
-
-        await orchestrator.processUserEditSignal(
-            source: "voice clutch",
-            target: "VoiceClutch",
-            editedTranscript: "please use VoiceClutch for this"
-        )
+        AutoAddCorrectionsPreference.save(true)
+        let notificationExpectation = expectation(forNotification: .customVocabularySuggestionAdded, object: nil) {
+            notification in
+            let source = notification.userInfo?[CustomVocabularyManager.NotificationUserInfoKey.source] as? String
+            let target = notification.userInfo?[CustomVocabularyManager.NotificationUserInfoKey.target] as? String
+            return source == "voice clutch" && target == "VoiceClutch"
+        }
+        _ = manager.recordUserEditSuggestion(source: "voice clutch", target: "VoiceClutch")
+        wait(for: [notificationExpectation], timeout: 0.1)
 
         let snapshot = manager.snapshot()
         XCTAssertEqual(snapshot.pendingSuggestions.count, 1)
@@ -498,65 +497,39 @@ final class VocabularySuggestionOrchestratorTests: XCTestCase {
         XCTAssertEqual(snapshot.pendingSuggestions[0].evidence, .userEdit)
     }
 
-    func testOrchestrator_autoCorrectionsGatePreventsEnqueue() async {
+    func testRecordUserEditSuggestion_autoCorrectionsGatePreventsEnqueue() {
         let manager = makeManager()
-        let orchestrator = VocabularySuggestionOrchestrator(
-            vocabularyManager: manager,
-            isAutoCorrectionsEnabled: { false }
-        )
+        AutoAddCorrectionsPreference.save(false)
+        defer { AutoAddCorrectionsPreference.save(true) }
 
-        await orchestrator.processUserEditSignal(
-            source: "voice clutch",
-            target: "VoiceClutch",
-            editedTranscript: "use VoiceClutch for this"
-        )
+        _ = manager.recordUserEditSuggestion(source: "voice clutch", target: "VoiceClutch")
 
         XCTAssertTrue(manager.snapshot().pendingSuggestions.isEmpty)
     }
 
-    func testOrchestrator_dedupesRepeatedUserEditSignals() async {
+    func testRecordUserEditSuggestion_dedupesRepeatedSignals() {
         let manager = makeManager()
-        let orchestrator = VocabularySuggestionOrchestrator(
-            vocabularyManager: manager,
-            isAutoCorrectionsEnabled: { true }
-        )
-
-        await orchestrator.processUserEditSignal(
-            source: "voice clutch",
-            target: "VoiceClutch",
-            editedTranscript: "use VoiceClutch for this"
-        )
-        await orchestrator.processUserEditSignal(
-            source: "voice clutch",
-            target: "VoiceClutch",
-            editedTranscript: "ship VoiceClutch now"
-        )
+        AutoAddCorrectionsPreference.save(true)
+        _ = manager.recordUserEditSuggestion(source: "voice clutch", target: "VoiceClutch")
+        _ = manager.recordUserEditSuggestion(source: "voice clutch", target: "VoiceClutch")
 
         let pending = manager.snapshot().pendingSuggestions
         XCTAssertEqual(pending.count, 1)
         XCTAssertEqual(pending[0].evidence, .userEdit)
     }
 
-    func testOrchestrator_skipsWhenTargetAlreadyExistsInSavedVocabulary() async throws {
+    func testRecordUserEditSuggestion_skipsWhenTargetAlreadyExistsInSavedVocabulary() throws {
         let manager = makeManager()
+        AutoAddCorrectionsPreference.save(true)
         _ = try manager.addManualEntry(from: "VoiceClutch: voice clutch")
-
-        let orchestrator = VocabularySuggestionOrchestrator(
-            vocabularyManager: manager,
-            isAutoCorrectionsEnabled: { true }
-        )
-
-        await orchestrator.processUserEditSignal(
-            source: "vc",
-            target: "VoiceClutch",
-            editedTranscript: "use VoiceClutch here"
-        )
+        _ = manager.recordUserEditSuggestion(source: "vc", target: "VoiceClutch")
 
         XCTAssertTrue(manager.snapshot().pendingSuggestions.isEmpty)
     }
 
-    func testOrchestrator_skipsWhenTargetAlreadyExistsInPendingSuggestions() async throws {
+    func testRecordUserEditSuggestion_skipsWhenTargetAlreadyExistsInPendingSuggestions() throws {
         let manager = makeManager()
+        AutoAddCorrectionsPreference.save(true)
         _ = try manager.addLLMSuggestions([
             LLMVocabularySuggestion(
                 source: "voice cluch",
@@ -566,17 +539,7 @@ final class VocabularySuggestionOrchestratorTests: XCTestCase {
                 targetTermStatus: .new
             )
         ])
-
-        let orchestrator = VocabularySuggestionOrchestrator(
-            vocabularyManager: manager,
-            isAutoCorrectionsEnabled: { true }
-        )
-
-        await orchestrator.processUserEditSignal(
-            source: "vc",
-            target: "VoiceClutch",
-            editedTranscript: "ship VoiceClutch"
-        )
+        _ = manager.recordUserEditSuggestion(source: "vc", target: "VoiceClutch")
 
         let pending = manager.snapshot().pendingSuggestions
         XCTAssertEqual(pending.count, 1)

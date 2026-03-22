@@ -40,6 +40,7 @@ public class TextInjector {
         let rewrittenText = CustomVocabularyManager.shared.applyRewriteRules(to: text)
         let finalText = rewrittenText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !finalText.isEmpty else { return }
+        CorrectionLearningMonitor.shared.prepareForUpcomingCapture()
 
         let pasteboard = NSPasteboard.general
         let shouldRecoverClipboard = ClipboardRecoveryPreference.load()
@@ -76,6 +77,7 @@ public class TextInjector {
         defer { stateLock.unlock() }
 
         guard !streamingState.isActive else { return }
+        CorrectionLearningMonitor.shared.prepareForUpcomingCapture()
 
         let pasteboard = NSPasteboard.general
         let shouldRecoverClipboard = ClipboardRecoveryPreference.load()

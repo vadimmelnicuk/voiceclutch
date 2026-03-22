@@ -7,40 +7,55 @@ import Foundation
 final class CorrectionLearningMonitor {
     static let shared = CorrectionLearningMonitor()
 
+    private enum CorrectionCaptureStrategy {
+        case focusedTextDiff
+        case editTracker
+    }
+
     private enum FocusedDiffOutcome {
         case unavailable
         case noLearnable
-        case learned(source: String, target: String, editedText: String)
+        case learned(source: String, target: String)
     }
 
     private struct Session {
         let originalText: String
         var editTracker: CursorAwareEditTracker
-        let focusedElement: AXUIElement?
+        let focusedElement: CorrectionLearningAccessibilityElement?
+        var snapshotElement: CorrectionLearningAccessibilityElement?
+        let manualAccessibilitySession: CorrectionLearningAccessibilityBridge.ManualAccessibilitySession?
         var focusedTextAtStart: String?
         var insertionStartInField: Int?
         var isAwaitingMouseRecovery: Bool
-        let startedAt: Date
+        var startedAt: Date
         var hasMeaningfulEdit: Bool
-        var hasConfirmedFocusedEdit: Bool
     }
 
     private let logger = AppLogger(category: "CorrectionLearning")
+    private let accessibilityBridge: CorrectionLearningAccessibilityBridge
     // Allow ample time to start editing, then capture shortly after edits settle.
     private let preEditInactivityTimeout: TimeInterval = 30.0
     private let postEditInactivityTimeout: TimeInterval = 2.0
     private let baselineSnapshotDelay: TimeInterval = 0.25
+    private let baselineSnapshotSearchWindow: TimeInterval = 3.0
+    private let mouseRecoveryPollDelay: TimeInterval = 0.08
+    private let mouseRecoveryPollWindow: TimeInterval = 1.0
     private let maximumCaptureWindow: TimeInterval = 30.0
     private var session: Session?
     private var timeoutTask: Task<Void, Never>?
     private var baselineSnapshotTask: Task<Void, Never>?
-    private var focusedEditConfirmationTask: Task<Void, Never>?
+    private var mouseRecoveryTask: Task<Void, Never>?
     private var globalKeyMonitor: Any?
     private var localKeyMonitor: Any?
     private var globalMouseMonitor: Any?
     private var localMouseMonitor: Any?
+    private var preparedManualAccessibilitySession: CorrectionLearningAccessibilityBridge.ManualAccessibilitySession?
 
-    private init() {}
+    init(
+        accessibilityBridge: CorrectionLearningAccessibilityBridge = CorrectionLearningAccessibilityBridge()
+    ) {
+        self.accessibilityBridge = accessibilityBridge
+    }
 
     func installEventMonitors() {
         guard
@@ -63,7 +78,10 @@ final class CorrectionLearningMonitor {
             return event
         }
 
-        let mouseEvents: NSEvent.EventTypeMask = [.leftMouseDown, .rightMouseDown, .otherMouseDown]
+        let mouseEvents: NSEvent.EventTypeMask = [
+            .leftMouseDown, .rightMouseDown, .otherMouseDown,
+            .leftMouseUp, .rightMouseUp, .otherMouseUp,
+        ]
         globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: mouseEvents) { [weak self] _ in
             Task { @MainActor in
                 self?.handleMouseActivity()
@@ -75,6 +93,11 @@ final class CorrectionLearningMonitor {
             }
             return event
         }
+    }
+
+    func prepareForUpcomingCapture() {
+        guard session == nil, preparedManualAccessibilitySession == nil else { return }
+        preparedManualAccessibilitySession = accessibilityBridge.prepareFocusedApplicationAccessibility()
     }
 
     func uninstallEventMonitors() {
@@ -108,9 +131,23 @@ final class CorrectionLearningMonitor {
         }
 
         let now = Date()
-        let focusedElementAtStart = focusedElement()
-        let focusedTextAtStart = focusedTextSnapshot(preferredElement: focusedElementAtStart)
-        let insertionStartInField = inferredInsertionStartInFocusedField(
+        let manualAccessibilitySession = preparedManualAccessibilitySession ?? accessibilityBridge.prepareFocusedApplicationAccessibility()
+        preparedManualAccessibilitySession = nil
+        let focusedElementAtStart = accessibilityBridge.focusedElement()
+        let baselineSelection = accessibilityBridge.focusedTextSelection(
+            preferredElement: focusedElementAtStart,
+            anchorText: insertedText,
+            reusePreferredElementSnapshot: false
+        )
+        let acceptedBaselineSelection: (text: String, element: CorrectionLearningAccessibilityElement)?
+        if let baselineSelection,
+           isPlausibleFocusedTextBaseline(baselineSelection.text, for: insertedText) {
+            acceptedBaselineSelection = baselineSelection
+        } else {
+            acceptedBaselineSelection = nil
+        }
+        let focusedTextAtStart = acceptedBaselineSelection?.text
+        let insertionStartInField = accessibilityBridge.inferredInsertionStartInFocusedField(
             insertedText: insertedText,
             focusedTextAtStart: focusedTextAtStart,
             preferredElement: focusedElementAtStart
@@ -119,14 +156,14 @@ final class CorrectionLearningMonitor {
             originalText: insertedText,
             editTracker: CursorAwareEditTracker(initialText: insertedText),
             focusedElement: focusedElementAtStart,
+            snapshotElement: acceptedBaselineSelection?.element,
+            manualAccessibilitySession: manualAccessibilitySession,
             focusedTextAtStart: focusedTextAtStart,
             insertionStartInField: insertionStartInField,
             isAwaitingMouseRecovery: false,
             startedAt: now,
-            hasMeaningfulEdit: false,
-            hasConfirmedFocusedEdit: false
+            hasMeaningfulEdit: false
         )
-        logger.debug("STARTED")
         scheduleBaselineSnapshotRefresh()
         scheduleTimeout()
     }
@@ -134,10 +171,13 @@ final class CorrectionLearningMonitor {
     func cancel() {
         baselineSnapshotTask?.cancel()
         baselineSnapshotTask = nil
-        focusedEditConfirmationTask?.cancel()
-        focusedEditConfirmationTask = nil
+        mouseRecoveryTask?.cancel()
+        mouseRecoveryTask = nil
         timeoutTask?.cancel()
         timeoutTask = nil
+        accessibilityBridge.restoreManualAccessibilityIfNeeded(session?.manualAccessibilitySession)
+        accessibilityBridge.restoreManualAccessibilityIfNeeded(preparedManualAccessibilitySession)
+        preparedManualAccessibilitySession = nil
         session = nil
     }
 
@@ -160,7 +200,7 @@ final class CorrectionLearningMonitor {
             NSPasteboard.general.string(forType: .string)
         }
         if didApplyMeaningfulEdit {
-            markMeaningfulEdit(in: &session)
+            session.hasMeaningfulEdit = true
         }
 
         self.session = session
@@ -185,26 +225,79 @@ final class CorrectionLearningMonitor {
         guard var session else { return }
         session.isAwaitingMouseRecovery = true
         self.session = session
+        if attemptMouseRecoveryIfPossible() {
+            scheduleTimeout()
+            return
+        }
+        scheduleMouseRecoveryPolling()
         scheduleTimeout()
+    }
+
+    @discardableResult
+    private func attemptMouseRecoveryIfPossible() -> Bool {
+        guard var session else { return false }
+        guard session.isAwaitingMouseRecovery else { return false }
+
+        guard let recoveredSelectionState = accessibilityBridge.recoverSelectionState(
+            modeledText: session.editTracker.modeledText,
+            insertionStartInField: session.insertionStartInField,
+            preferredElement: session.snapshotElement ?? session.focusedElement
+        ) else {
+            return false
+        }
+
+        session.editTracker.noteMouseInteraction(
+            recoveredCaretOffsetFromEnd: recoveredSelectionState.caretOffsetFromEnd,
+            recoveredSelectionLength: recoveredSelectionState.selectedRangeLength
+        )
+        session.isAwaitingMouseRecovery = false
+        self.session = session
+        mouseRecoveryTask?.cancel()
+        mouseRecoveryTask = nil
+        return true
     }
 
     private func resolveMouseRecoveryIfNeeded(in session: inout Session) {
         guard session.isAwaitingMouseRecovery else { return }
         session.isAwaitingMouseRecovery = false
+        mouseRecoveryTask?.cancel()
+        mouseRecoveryTask = nil
 
-        let wasDeterministic = session.editTracker.isDeterministic
-        let recoveredSelectionState = recoverSelectionState(session: session)
+        let recoveredSelectionState = accessibilityBridge.recoverSelectionState(
+            modeledText: session.editTracker.modeledText,
+            insertionStartInField: session.insertionStartInField,
+            preferredElement: session.snapshotElement ?? session.focusedElement
+        )
         session.editTracker.noteMouseInteraction(
             recoveredCaretOffsetFromEnd: recoveredSelectionState?.caretOffsetFromEnd,
             recoveredSelectionLength: recoveredSelectionState?.selectedRangeLength ?? 0
         )
+    }
 
-        if wasDeterministic && !session.editTracker.isDeterministic {
-            logger.debug("Edit tracker downgraded after mouse interaction")
-        } else if let recoveredSelectionState {
-            logger.debug(
-                "Edit tracker recovered after mouse interaction source=\(recoveredSelectionState.source) caretOffset=\(recoveredSelectionState.caretOffsetFromEnd) selectionLength=\(recoveredSelectionState.selectedRangeLength)"
-            )
+    private func scheduleMouseRecoveryPolling() {
+        mouseRecoveryTask?.cancel()
+        guard session?.isAwaitingMouseRecovery == true else { return }
+
+        mouseRecoveryTask = Task { [weak self] in
+            guard let self else { return }
+            let searchDeadline = Date().addingTimeInterval(self.mouseRecoveryPollWindow)
+
+            while !Task.isCancelled, Date() < searchDeadline {
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(self.mouseRecoveryPollDelay * 1_000_000_000))
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled else { return }
+
+                let recovered = await MainActor.run { () -> Bool in
+                    self.attemptMouseRecoveryIfPossible()
+                }
+
+                if recovered {
+                    return
+                }
+            }
         }
     }
 
@@ -220,7 +313,7 @@ final class CorrectionLearningMonitor {
             return
         }
 
-        let inactivityTimeout = session.hasConfirmedFocusedEdit
+        let inactivityTimeout = session.hasMeaningfulEdit
             ? postEditInactivityTimeout
             : preEditInactivityTimeout
         let delay = min(inactivityTimeout, remainingCaptureWindow)
@@ -243,71 +336,57 @@ final class CorrectionLearningMonitor {
         baselineSnapshotTask?.cancel()
         baselineSnapshotTask = Task { [weak self] in
             guard let self else { return }
-            do {
-                try await Task.sleep(nanoseconds: UInt64(baselineSnapshotDelay * 1_000_000_000))
-            } catch {
-                return
-            }
-            guard !Task.isCancelled else { return }
+            let searchDeadline = Date().addingTimeInterval(self.baselineSnapshotSearchWindow)
 
-            await MainActor.run {
-                guard var session = self.session else { return }
-                // If a baseline was already captured and edits started, keep it.
-                // If baseline is still missing, keep trying once after settle.
-                guard !session.hasMeaningfulEdit || session.focusedTextAtStart == nil else { return }
-                guard let refreshedBaseline = self.focusedTextSnapshot(
-                    preferredElement: session.focusedElement
-                ) else {
+            while !Task.isCancelled, Date() < searchDeadline {
+                do {
+                    try await Task.sleep(nanoseconds: UInt64(self.baselineSnapshotDelay * 1_000_000_000))
+                } catch {
                     return
                 }
-                session.focusedTextAtStart = refreshedBaseline
-                if session.insertionStartInField == nil {
-                    session.insertionStartInField = self.inferredInsertionStartInFocusedField(
-                        insertedText: session.editTracker.modeledText,
-                        focusedTextAtStart: refreshedBaseline,
-                        preferredElement: session.focusedElement
-                    )
+                guard !Task.isCancelled else { return }
+
+                let capturedBaseline = await MainActor.run { () -> Bool in
+                    guard var session = self.session else { return true }
+                    guard !session.hasMeaningfulEdit else { return true }
+                    guard !self.isPlausibleFocusedTextBaseline(
+                        session.focusedTextAtStart,
+                        for: session.originalText
+                    ) else {
+                        return true
+                    }
+
+                    let preferredElement = self.accessibilityBridge.focusedElement() ?? session.focusedElement
+                    guard let preferredElement,
+                          let refreshedSelection = self.accessibilityBridge.focusedTextSelection(
+                            preferredElement: preferredElement,
+                            anchorText: session.originalText,
+                            reusePreferredElementSnapshot: false
+                          ),
+                          self.isPlausibleFocusedTextBaseline(
+                            refreshedSelection.text,
+                            for: session.originalText
+                          ) else {
+                        return false
+                    }
+
+                    let refreshedBaseline = refreshedSelection.text
+                    session.focusedTextAtStart = refreshedBaseline
+                    session.snapshotElement = refreshedSelection.element
+                    if session.insertionStartInField == nil {
+                        session.insertionStartInField = self.accessibilityBridge.inferredInsertionStartInFocusedField(
+                            insertedText: session.editTracker.modeledText,
+                            focusedTextAtStart: refreshedBaseline,
+                            preferredElement: preferredElement
+                        )
+                    }
+                    self.session = session
+                    return true
                 }
-                self.session = session
-                self.logger.debug("Refreshed focused-text baseline after settle")
-            }
-        }
-    }
 
-    private func markMeaningfulEdit(in session: inout Session) {
-        session.hasMeaningfulEdit = true
-
-        if !session.hasConfirmedFocusedEdit,
-           focusedTextHasChanged(from: session.focusedTextAtStart, preferredElement: session.focusedElement) {
-            session.hasConfirmedFocusedEdit = true
-        } else if !session.hasConfirmedFocusedEdit {
-            scheduleFocusedEditConfirmationCheck()
-        }
-    }
-
-    private func scheduleFocusedEditConfirmationCheck() {
-        focusedEditConfirmationTask?.cancel()
-        focusedEditConfirmationTask = Task { [weak self] in
-            guard let self else { return }
-            do {
-                try await Task.sleep(nanoseconds: 250_000_000)
-            } catch {
-                return
-            }
-            guard !Task.isCancelled else { return }
-
-            await MainActor.run {
-                guard var session = self.session else { return }
-                guard session.hasMeaningfulEdit, !session.hasConfirmedFocusedEdit else { return }
-                guard self.focusedTextHasChanged(
-                    from: session.focusedTextAtStart,
-                    preferredElement: session.focusedElement
-                ) else {
+                if capturedBaseline {
                     return
                 }
-                session.hasConfirmedFocusedEdit = true
-                self.session = session
-                self.scheduleTimeout()
             }
         }
     }
@@ -315,8 +394,8 @@ final class CorrectionLearningMonitor {
     private func finishMonitoring(allowContinuationOnNoLearnable: Bool = false) {
         baselineSnapshotTask?.cancel()
         baselineSnapshotTask = nil
-        focusedEditConfirmationTask?.cancel()
-        focusedEditConfirmationTask = nil
+        mouseRecoveryTask?.cancel()
+        mouseRecoveryTask = nil
         timeoutTask?.cancel()
         timeoutTask = nil
 
@@ -326,109 +405,103 @@ final class CorrectionLearningMonitor {
         let canContinueCapture = allowContinuationOnNoLearnable && elapsed < maximumCaptureWindow
 
         guard finishedSession.hasMeaningfulEdit else {
+            accessibilityBridge.restoreManualAccessibilityIfNeeded(finishedSession.manualAccessibilitySession)
             session = nil
-            logger.debug("ENDED")
             return
         }
         guard AutoAddCorrectionsPreference.load() else {
+            accessibilityBridge.restoreManualAccessibilityIfNeeded(finishedSession.manualAccessibilitySession)
             session = nil
-            logger.debug("SKIPPED")
             return
         }
 
-        let focusedCandidate: (source: String, target: String, editedText: String)?
+        let focusedCandidate: (source: String, target: String)?
         switch deriveCorrectionFromFocusedTextDiff(session: finishedSession) {
-        case .learned(let source, let target, let editedText):
-            focusedCandidate = (source: source, target: target, editedText: editedText)
+        case .learned(let source, let target):
+            focusedCandidate = (source: source, target: target)
         case .noLearnable, .unavailable:
             focusedCandidate = nil
         }
 
-        let trackerCandidate: (source: String, target: String, editedText: String)?
+        let trackerCandidate: (source: String, target: String)?
         if let correction = deriveCorrection(
             from: finishedSession.originalText,
             to: finishedSession.editTracker.modeledText
         ) {
-            trackerCandidate = (
-                source: correction.source,
-                target: correction.target,
-                editedText: finishedSession.editTracker.modeledText
-            )
+            trackerCandidate = (source: correction.source, target: correction.target)
         } else {
             trackerCandidate = nil
         }
-        if !finishedSession.editTracker.isDeterministic {
-            logger.debug("Edit tracker is non-deterministic; tracker-based learning requires focused-text diff")
+        let selectedCorrection: (
+            strategy: CorrectionCaptureStrategy,
+            candidate: (source: String, target: String)
+        )?
+        if let focusedCandidate {
+            selectedCorrection = (.focusedTextDiff, focusedCandidate)
+        } else if finishedSession.editTracker.isDeterministic, let trackerCandidate {
+            selectedCorrection = (.editTracker, trackerCandidate)
+        } else {
+            selectedCorrection = nil
         }
 
-        let strategy = CorrectionCaptureStrategyResolver.resolve(
-            focusedDiffHasCandidate: focusedCandidate != nil,
-            trackerIsDeterministic: finishedSession.editTracker.isDeterministic,
-            trackerHasCandidate: trackerCandidate != nil
-        )
-
-        let selectedCandidate: (source: String, target: String, editedText: String)?
-        switch strategy {
-        case .focusedTextDiff:
-            selectedCandidate = focusedCandidate
-        case .editTracker:
-            selectedCandidate = trackerCandidate
-        case .none:
-            selectedCandidate = nil
-        }
-
-        guard let selectedCandidate else {
+        guard let selectedCorrection else {
             if canContinueCapture {
                 continueMonitoringAfterNoLearnableResult(from: &finishedSession)
                 return
             }
+            accessibilityBridge.restoreManualAccessibilityIfNeeded(finishedSession.manualAccessibilitySession)
             session = nil
-            logger.debug("No learnable correction derived from any strategy")
             return
         }
-        logger.debug("Using correction strategy=\(strategyLabel(strategy))")
 
         if isExistingLearnedReplacement(
-            source: selectedCandidate.source,
-            target: selectedCandidate.target
+            source: selectedCorrection.candidate.source,
+            target: selectedCorrection.candidate.target
         ) {
             if canContinueCapture {
                 continueMonitoringAfterNoLearnableResult(from: &finishedSession)
             } else {
+                accessibilityBridge.restoreManualAccessibilityIfNeeded(finishedSession.manualAccessibilitySession)
                 session = nil
             }
-            logger.debug("IGNORED")
             return
         }
 
-        session = nil
-        logger.debug(
-            "CAPTURED strategy=\(strategyLabel(strategy)) sourceLength=\(selectedCandidate.source.count) targetLength=\(selectedCandidate.target.count)"
+        let learnedSource = selectedCorrection.candidate.source
+        let learnedTarget = selectedCorrection.candidate.target
+        logger.info(
+            "detected strategy=\(strategyLabel(selectedCorrection.strategy)) source=\"\(compactLogValue(learnedSource))\" target=\"\(compactLogValue(learnedTarget))\""
         )
-        let learnedSource = selectedCandidate.source
-        let learnedTarget = selectedCandidate.target
-        let editedTranscript = selectedCandidate.editedText
 
         Task.detached(priority: .utility) {
-            await VocabularySuggestionOrchestrator.shared.processUserEditSignal(
+            _ = CustomVocabularyManager.shared.recordUserEditSuggestion(
                 source: learnedSource,
-                target: learnedTarget,
-                editedTranscript: editedTranscript
+                target: learnedTarget
             )
         }
+        continueMonitoringAfterNoLearnableResult(from: &finishedSession, restartCaptureWindow: true)
     }
 
-    private func continueMonitoringAfterNoLearnableResult(from session: inout Session) {
+    private func continueMonitoringAfterNoLearnableResult(
+        from session: inout Session,
+        restartCaptureWindow: Bool = false
+    ) {
+        mouseRecoveryTask?.cancel()
+        mouseRecoveryTask = nil
         let nextBaselineText: String
-        if let focusedTextAtEnd = focusedTextSnapshot(preferredElement: session.focusedElement) {
-            session.focusedTextAtStart = focusedTextAtEnd
-            nextBaselineText = focusedTextAtEnd
+        if let latestSelection = accessibilityBridge.focusedTextSelection(
+            preferredElement: session.snapshotElement ?? session.focusedElement,
+            reusePreferredElementSnapshot: session.snapshotElement != nil
+        ) {
+            session.focusedTextAtStart = latestSelection.text
+            session.snapshotElement = latestSelection.element
+            nextBaselineText = latestSelection.text
         } else {
             nextBaselineText = session.editTracker.modeledText
         }
         session.editTracker.resetBaseline(to: nextBaselineText)
         if session.insertionStartInField == nil {
-            session.insertionStartInField = inferredInsertionStartInFocusedField(
+            session.insertionStartInField = accessibilityBridge.inferredInsertionStartInFocusedField(
                 insertedText: nextBaselineText,
                 focusedTextAtStart: session.focusedTextAtStart,
                 preferredElement: session.focusedElement
@@ -436,7 +509,9 @@ final class CorrectionLearningMonitor {
         }
         session.isAwaitingMouseRecovery = false
         session.hasMeaningfulEdit = false
-        session.hasConfirmedFocusedEdit = false
+        if restartCaptureWindow {
+            session.startedAt = Date()
+        }
         self.session = session
         scheduleTimeout()
     }
@@ -447,32 +522,11 @@ final class CorrectionLearningMonitor {
             return "focused_text_diff"
         case .editTracker:
             return "edit_tracker"
-        case .none:
-            return "none"
         }
-    }
-
-    private func focusedTextHasChanged(
-        from baseline: String?,
-        preferredElement: AXUIElement?
-    ) -> Bool {
-        guard let baseline else { return false }
-        guard let current = focusedTextSnapshot(preferredElement: preferredElement) else { return false }
-        return current != baseline
     }
 
     private func isExistingLearnedReplacement(source: String, target: String) -> Bool {
-        let normalizedSource = CustomVocabularyManager.normalizedLookupKey(source)
-        let normalizedTarget = CustomVocabularyManager.normalizedLookupKey(target)
-        guard !normalizedSource.isEmpty, !normalizedTarget.isEmpty else {
-            return false
-        }
-
-        let snapshot = CustomVocabularyManager.shared.snapshot()
-        return snapshot.learnedRules.contains { rule in
-            CustomVocabularyManager.normalizedLookupKey(rule.source) == normalizedSource &&
-                CustomVocabularyManager.normalizedLookupKey(rule.target) == normalizedTarget
-        }
+        CustomVocabularyManager.shared.hasLearnedRule(source: source, target: target)
     }
 
     private func deriveCorrection(from original: String, to current: String) -> (source: String, target: String)? {
@@ -549,24 +603,73 @@ final class CorrectionLearningMonitor {
         }
     }
 
+    nonisolated static func focusedTextBaselinePlausibilityForTesting(
+        snapshot: String?,
+        anchorText: String
+    ) async -> Bool {
+        await MainActor.run {
+            CorrectionLearningMonitor.shared.isPlausibleFocusedTextBaseline(snapshot, for: anchorText)
+        }
+    }
+
     private func deriveCorrectionFromFocusedTextDiff(session: Session) -> FocusedDiffOutcome {
-        guard let focusedTextAtStart = session.focusedTextAtStart else {
-            logger.debug("Focused-text baseline snapshot unavailable")
+        let baselineText = session.focusedTextAtStart ?? session.originalText
+        let preferredElement: CorrectionLearningAccessibilityElement? = if session.focusedTextAtStart == nil {
+            accessibilityBridge.focusedElement() ?? session.snapshotElement ?? session.focusedElement
+        } else {
+            session.snapshotElement ?? session.focusedElement
+        }
+        let shouldReusePreferredSnapshot = session.focusedTextAtStart != nil && session.snapshotElement != nil
+
+        guard let focusedTextAtEnd = accessibilityBridge.focusedTextSelection(
+            preferredElement: preferredElement,
+            anchorText: baselineText,
+            reusePreferredElementSnapshot: shouldReusePreferredSnapshot
+        )?.text else {
             return .unavailable
         }
-        guard let focusedTextAtEnd = focusedTextSnapshot(preferredElement: session.focusedElement) else {
-            logger.debug("Focused-text end snapshot unavailable")
-            return .unavailable
-        }
-        guard focusedTextAtEnd != focusedTextAtStart else {
-            logger.debug("Focused-text snapshot unchanged")
+        guard focusedTextAtEnd != baselineText else {
             return .noLearnable
         }
 
-        if let correction = deriveCorrection(from: focusedTextAtStart, to: focusedTextAtEnd) {
-            return .learned(source: correction.source, target: correction.target, editedText: focusedTextAtEnd)
+        if let correction = deriveCorrection(from: baselineText, to: focusedTextAtEnd) {
+            return .learned(source: correction.source, target: correction.target)
         }
         return .noLearnable
+    }
+
+    private func isPlausibleFocusedTextBaseline(_ snapshot: String?, for anchorText: String) -> Bool {
+        guard let snapshot else { return false }
+
+        let normalizedSnapshot = CustomVocabularyManager.normalizedLookupKey(snapshot)
+        let normalizedAnchor = CustomVocabularyManager.normalizedLookupKey(anchorText)
+        guard !normalizedSnapshot.isEmpty, !normalizedAnchor.isEmpty else {
+            return false
+        }
+
+        let collapsedSnapshot = CustomVocabularyManager.normalizedCollapsedKey(snapshot)
+        let collapsedAnchor = CustomVocabularyManager.normalizedCollapsedKey(anchorText)
+        if normalizedSnapshot == normalizedAnchor || (!collapsedAnchor.isEmpty && collapsedSnapshot == collapsedAnchor) {
+            return true
+        }
+        if !collapsedAnchor.isEmpty && collapsedSnapshot.contains(collapsedAnchor) {
+            return true
+        }
+
+        let anchorTokens = Set(normalizedAnchor.split(whereSeparator: \.isWhitespace).map(String.init))
+        let snapshotTokens = normalizedSnapshot.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard !anchorTokens.isEmpty, !snapshotTokens.isEmpty else {
+            return false
+        }
+
+        let overlapCount = anchorTokens.reduce(0) { partialResult, token in
+            partialResult + (snapshotTokens.contains(token) ? 1 : 0)
+        }
+        let recall = Double(overlapCount) / Double(anchorTokens.count)
+        let precision = Double(overlapCount) / Double(snapshotTokens.count)
+        let lengthRatio = Double(snapshot.count) / Double(max(anchorText.count, 1))
+
+        return recall >= 0.75 && precision >= 0.60 && lengthRatio >= 0.80 && lengthRatio <= 1.75
     }
 
     private func normalizeLearnedFragment(_ fragment: String) -> String {
@@ -579,6 +682,16 @@ final class CorrectionLearningMonitor {
             CharacterSet(charactersIn: ".,!?;:\"“”‘’()[]{}")
         )
         return whitespaceCollapsed.trimmingCharacters(in: trimmableCharacters)
+    }
+
+    private func compactLogValue(_ value: String, limit: Int = 48) -> String {
+        let singleLine = value
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        if singleLine.count <= limit {
+            return singleLine
+        }
+        return String(singleLine.prefix(limit - 3)) + "..."
     }
 
     private func singleWordCorrection(source: String, target: String) -> (source: String, target: String)? {
@@ -719,185 +832,6 @@ final class CorrectionLearningMonitor {
         return (sourceWords == 1 && targetWords > 1) || (targetWords == 1 && sourceWords > 1)
     }
 
-    private func focusedTextSnapshot(preferredElement: AXUIElement? = nil) -> String? {
-        if let preferredElement {
-            for element in candidateElements(startingAt: preferredElement) {
-                if let preferredText = snapshotText(from: element) {
-                    return preferredText
-                }
-            }
-        }
-
-        guard let focusedElement = focusedElement() else {
-            return nil
-        }
-
-        for element in candidateElements(startingAt: focusedElement) {
-            if let text = snapshotText(from: element) {
-                return text
-            }
-        }
-        return nil
-    }
-
-    private func inferredInsertionStartInFocusedField(
-        insertedText: String,
-        focusedTextAtStart: String?,
-        preferredElement: AXUIElement?
-    ) -> Int? {
-        if let focusedTextAtStart,
-           let matchedRange = uniqueRange(of: insertedText, in: focusedTextAtStart) {
-            return focusedTextAtStart.distance(from: focusedTextAtStart.startIndex, to: matchedRange.lowerBound)
-        }
-
-        guard insertedText.count > 0,
-              let selectedRange = selectedTextRangeSnapshot(preferredElement: preferredElement),
-              selectedRange.length == 0,
-              selectedRange.location >= insertedText.count else {
-            return nil
-        }
-
-        return selectedRange.location - insertedText.count
-    }
-
-    private func selectedTextRangeSnapshot(preferredElement: AXUIElement?) -> CFRange? {
-        if let preferredElement {
-            for element in candidateElements(startingAt: preferredElement) {
-                if let selectedRange = rangeAttributeValue(
-                    on: element,
-                    attribute: kAXSelectedTextRangeAttribute as CFString
-                ),
-                selectedRange.location >= 0,
-                selectedRange.length >= 0 {
-                    return selectedRange
-                }
-            }
-        }
-
-        guard let focusedElement = focusedElement() else { return nil }
-        for element in candidateElements(startingAt: focusedElement) {
-            if let selectedRange = rangeAttributeValue(
-                on: element,
-                attribute: kAXSelectedTextRangeAttribute as CFString
-            ),
-            selectedRange.location >= 0,
-            selectedRange.length >= 0 {
-                return selectedRange
-            }
-        }
-        return nil
-    }
-
-    private struct RecoveredSelectionState {
-        let caretOffsetFromEnd: Int
-        let selectedRangeLength: Int
-        let source: String
-    }
-
-    private func recoverSelectionState(session: Session) -> RecoveredSelectionState? {
-        let modeledText = session.editTracker.modeledText
-        guard !modeledText.isEmpty else { return nil }
-
-        let startElement = session.focusedElement ?? focusedElement()
-        guard let startElement else { return nil }
-
-        for element in candidateElements(startingAt: startElement) {
-            if let selectedTextRecoveredState = recoverSelectionStateFromSelectedText(
-                modeledText: modeledText,
-                element: element
-            ) {
-                return selectedTextRecoveredState
-            }
-
-            guard let selectedRange = rangeAttributeValue(
-                on: element,
-                attribute: kAXSelectedTextRangeAttribute as CFString
-            ) else {
-                continue
-            }
-            guard selectedRange.location >= 0, selectedRange.length >= 0 else {
-                continue
-            }
-
-            if let insertionStartInField = session.insertionStartInField {
-                let insertionEndInField = insertionStartInField + modeledText.count
-                let selectionStartInField = selectedRange.location
-                let selectionEndInField = selectionStartInField + selectedRange.length
-                guard selectionStartInField >= insertionStartInField,
-                      selectionEndInField <= insertionEndInField else {
-                    continue
-                }
-
-                let relativeSelectionEnd = selectionEndInField - insertionStartInField
-                let caretOffsetFromEnd = modeledText.count - relativeSelectionEnd
-                return RecoveredSelectionState(
-                    caretOffsetFromEnd: caretOffsetFromEnd,
-                    selectedRangeLength: selectedRange.length,
-                    source: "selected_range_with_anchor"
-                )
-            }
-
-            guard let fullText = fullTextSnapshot(from: element),
-                  let modeledRange = uniqueRange(of: modeledText, in: fullText) else {
-                continue
-            }
-
-            let modeledStartOffset = fullText.distance(from: fullText.startIndex, to: modeledRange.lowerBound)
-            let modeledEndOffset = fullText.distance(from: fullText.startIndex, to: modeledRange.upperBound)
-            let selectionStartInField = selectedRange.location
-            let selectionEndInField = selectionStartInField + selectedRange.length
-            guard selectionStartInField >= modeledStartOffset,
-                  selectionEndInField <= modeledEndOffset else {
-                continue
-            }
-
-            let relativeSelectionEnd = selectionEndInField - modeledStartOffset
-            let caretOffsetFromEnd = modeledText.count - relativeSelectionEnd
-            return RecoveredSelectionState(
-                caretOffsetFromEnd: caretOffsetFromEnd,
-                selectedRangeLength: selectedRange.length,
-                source: "selected_range_with_full_text"
-            )
-        }
-        return nil
-    }
-
-    private func recoverSelectionStateFromSelectedText(
-        modeledText: String,
-        element: AXUIElement
-    ) -> RecoveredSelectionState? {
-        guard let selectedText = stringAttributeValue(on: element, attribute: kAXSelectedTextAttribute as CFString),
-              let normalizedSelectedText = normalizedSnapshotText(selectedText),
-              !normalizedSelectedText.isEmpty,
-              normalizedSelectedText.count <= modeledText.count,
-              let selectedRangeInModeledText = uniqueRange(of: normalizedSelectedText, in: modeledText) else {
-            return nil
-        }
-
-        let selectedRangeUpperOffset = modeledText.distance(
-            from: selectedRangeInModeledText.upperBound,
-            to: modeledText.endIndex
-        )
-        return RecoveredSelectionState(
-            caretOffsetFromEnd: selectedRangeUpperOffset,
-            selectedRangeLength: normalizedSelectedText.count,
-            source: "selected_text"
-        )
-    }
-
-    private func fullTextSnapshot(from element: AXUIElement) -> String? {
-        if let value = stringAttributeValue(on: element, attribute: kAXValueAttribute as CFString) {
-            return normalizedSnapshotText(value)
-        }
-        if let attributedValue = attributedStringAttributeValue(on: element, attribute: kAXValueAttribute as CFString) {
-            return normalizedSnapshotText(attributedValue)
-        }
-        if let fullRangeValue = fullRangeStringValue(on: element) {
-            return normalizedSnapshotText(fullRangeValue)
-        }
-        return nil
-    }
-
     private func uniqueRange(of needle: String, in haystack: String) -> Range<String.Index>? {
         guard !needle.isEmpty else { return nil }
 
@@ -917,191 +851,6 @@ final class CorrectionLearningMonitor {
             }
         }
         return uniqueMatch
-    }
-
-    private func snapshotText(from element: AXUIElement) -> String? {
-        if let value = stringAttributeValue(on: element, attribute: kAXValueAttribute as CFString) {
-            return normalizedSnapshotText(value)
-        }
-        if let attributedValue = attributedStringAttributeValue(on: element, attribute: kAXValueAttribute as CFString) {
-            return normalizedSnapshotText(attributedValue)
-        }
-        if let selectedText = stringAttributeValue(on: element, attribute: kAXSelectedTextAttribute as CFString),
-           !selectedText.isEmpty {
-            return normalizedSnapshotText(selectedText)
-        }
-        if let visibleRangeValue = visibleRangeStringValue(on: element) {
-            return normalizedSnapshotText(visibleRangeValue)
-        }
-
-        guard let value = fullRangeStringValue(on: element) else { return nil }
-        return normalizedSnapshotText(value)
-    }
-
-    private func candidateElements(startingAt element: AXUIElement) -> [AXUIElement] {
-        var results: [AXUIElement] = []
-        var current: AXUIElement? = element
-        var visited: Set<String> = []
-        let maxDepth = 4
-
-        for _ in 0..<maxDepth {
-            guard let node = current else { break }
-            let key = String(describing: node)
-            guard visited.insert(key).inserted else { break }
-            results.append(node)
-            current = parentElement(of: node)
-        }
-
-        return results
-    }
-
-    private func parentElement(of element: AXUIElement) -> AXUIElement? {
-        var value: CFTypeRef?
-        let status = AXUIElementCopyAttributeValue(
-            element,
-            kAXParentAttribute as CFString,
-            &value
-        )
-        guard status == .success,
-              let value,
-              CFGetTypeID(value) == AXUIElementGetTypeID() else {
-            return nil
-        }
-        return (value as! AXUIElement)
-    }
-
-    private func focusedElement() -> AXUIElement? {
-        let systemWideElement = AXUIElementCreateSystemWide()
-
-        var focusedElementValue: CFTypeRef?
-        let focusedStatus = AXUIElementCopyAttributeValue(
-            systemWideElement,
-            kAXFocusedUIElementAttribute as CFString,
-            &focusedElementValue
-        )
-        guard focusedStatus == .success,
-              let focusedElementValue,
-              CFGetTypeID(focusedElementValue) == AXUIElementGetTypeID() else {
-            return nil
-        }
-        let focusedElement: AXUIElement = focusedElementValue as! AXUIElement
-        return focusedElement
-    }
-
-    private func stringAttributeValue(on element: AXUIElement, attribute: CFString) -> String? {
-        var value: CFTypeRef?
-        let status = AXUIElementCopyAttributeValue(
-            element,
-            attribute,
-            &value
-        )
-        guard status == .success,
-              let value,
-              CFGetTypeID(value) == CFStringGetTypeID() else {
-            return nil
-        }
-        return value as? String
-    }
-
-    private func attributedStringAttributeValue(on element: AXUIElement, attribute: CFString) -> String? {
-        var value: CFTypeRef?
-        let status = AXUIElementCopyAttributeValue(
-            element,
-            attribute,
-            &value
-        )
-        guard status == .success, let value else {
-            return nil
-        }
-
-        if CFGetTypeID(value) == CFAttributedStringGetTypeID() {
-            let attributed = value as! NSAttributedString
-            return attributed.string
-        }
-        return nil
-    }
-
-    private func visibleRangeStringValue(on element: AXUIElement) -> String? {
-        guard let visibleRange = rangeAttributeValue(on: element, attribute: kAXVisibleCharacterRangeAttribute as CFString),
-              visibleRange.length > 0 else {
-            return nil
-        }
-        return stringForRange(on: element, range: visibleRange)
-    }
-
-    private func rangeAttributeValue(on element: AXUIElement, attribute: CFString) -> CFRange? {
-        var value: CFTypeRef?
-        let status = AXUIElementCopyAttributeValue(
-            element,
-            attribute,
-            &value
-        )
-        guard status == .success,
-              let value,
-              CFGetTypeID(value) == AXValueGetTypeID() else {
-            return nil
-        }
-
-        let axValue = value as! AXValue
-        guard AXValueGetType(axValue) == .cfRange else {
-            return nil
-        }
-
-        var range = CFRange(location: 0, length: 0)
-        guard AXValueGetValue(axValue, .cfRange, &range) else {
-            return nil
-        }
-        return range
-    }
-
-    private func stringForRange(on element: AXUIElement, range: CFRange) -> String? {
-        var mutableRange = range
-        guard let rangeValue = AXValueCreate(.cfRange, &mutableRange) else {
-            return nil
-        }
-
-        var rangeStringValue: CFTypeRef?
-        let status = AXUIElementCopyParameterizedAttributeValue(
-            element,
-            kAXStringForRangeParameterizedAttribute as CFString,
-            rangeValue,
-            &rangeStringValue
-        )
-        guard status == .success,
-              let rangeStringValue,
-              CFGetTypeID(rangeStringValue) == CFStringGetTypeID() else {
-            return nil
-        }
-
-        return rangeStringValue as? String
-    }
-
-    private func fullRangeStringValue(on element: AXUIElement) -> String? {
-        var countValue: CFTypeRef?
-        let countStatus = AXUIElementCopyAttributeValue(
-            element,
-            kAXNumberOfCharactersAttribute as CFString,
-            &countValue
-        )
-        guard countStatus == .success,
-              let countValue,
-              CFGetTypeID(countValue) == CFNumberGetTypeID() else {
-            return nil
-        }
-
-        var characterCount: Int64 = 0
-        let didReadCount = CFNumberGetValue(
-            (countValue as! CFNumber),
-            .sInt64Type,
-            &characterCount
-        )
-        guard didReadCount, characterCount > 0 else {
-            return nil
-        }
-
-        let maxSnapshotLength: Int64 = 50_000
-        let range = CFRange(location: 0, length: Int(min(characterCount, maxSnapshotLength)))
-        return stringForRange(on: element, range: range)
     }
 
     private func normalizedSnapshotText(_ value: String) -> String? {

@@ -1,28 +1,6 @@
 import Carbon
 import Foundation
 
-enum CorrectionCaptureStrategy: Equatable {
-    case focusedTextDiff
-    case editTracker
-    case none
-}
-
-struct CorrectionCaptureStrategyResolver {
-    static func resolve(
-        focusedDiffHasCandidate: Bool,
-        trackerIsDeterministic: Bool,
-        trackerHasCandidate: Bool
-    ) -> CorrectionCaptureStrategy {
-        if focusedDiffHasCandidate {
-            return .focusedTextDiff
-        }
-        if trackerHasCandidate, trackerIsDeterministic {
-            return .editTracker
-        }
-        return .none
-    }
-}
-
 struct CursorAwareEditTracker {
     private(set) var modeledText: String
     private(set) var caretOffsetFromEnd: Int
@@ -71,6 +49,7 @@ struct CursorAwareEditTracker {
 
         caretOffsetFromEnd = recoveredCaretOffsetFromEnd
         selectedRangeLength = recoveredSelectionLength
+        isDeterministic = true
     }
 
     @discardableResult

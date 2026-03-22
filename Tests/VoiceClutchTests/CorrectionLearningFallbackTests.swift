@@ -86,26 +86,6 @@ final class CursorAwareEditTrackerTests: XCTestCase {
 }
 
 final class CorrectionLearningStrategyTests: XCTestCase {
-    func testStrategyResolver_rejectsNonDeterministicTrackerCandidate() {
-        let strategy = CorrectionCaptureStrategyResolver.resolve(
-            focusedDiffHasCandidate: false,
-            trackerIsDeterministic: false,
-            trackerHasCandidate: true
-        )
-
-        XCTAssertEqual(strategy, .none)
-    }
-
-    func testStrategyResolver_usesDeterministicTrackerCandidate() {
-        let strategy = CorrectionCaptureStrategyResolver.resolve(
-            focusedDiffHasCandidate: false,
-            trackerIsDeterministic: true,
-            trackerHasCandidate: true
-        )
-
-        XCTAssertEqual(strategy, .editTracker)
-    }
-
     func testCorrectionLearning_ignoresSyntheticEvents() {
         let syntheticEvent = ObservedKeyEvent(
             kind: .keyDown,

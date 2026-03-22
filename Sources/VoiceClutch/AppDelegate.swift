@@ -49,6 +49,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var lastPermissionSnapshot: PermissionSnapshot?
     private var hotkeyRecoveryTimer: Timer?
     private var missingPermissionShortcutFeedbackTimer: Timer?
+    private var vocabularySuggestionObserver: NSObjectProtocol?
     private var isMissingPermissionShortcutCurrentlyPressed = false
     private var memoryPressureSource: DispatchSourceMemoryPressure?
     private var isListeningHotkeyHeld = false
@@ -87,6 +88,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         setupStateObserving()
         setupMemoryPressureMonitoring()
         setupPermissionMonitoring()
+        setupVocabularySuggestionNotifications()
 
         Task { [weak self] in
             await self?.runInitialPermissionOnboardingIfNeeded()
@@ -188,6 +190,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         missingPermissionShortcutFeedbackTimer?.invalidate()
         missingPermissionShortcutFeedbackTimer = nil
         permissionsCoordinator.stopMonitoring()
+        if let vocabularySuggestionObserver {
+            NotificationCenter.default.removeObserver(vocabularySuggestionObserver)
+            self.vocabularySuggestionObserver = nil
+        }
         resumeMediaIfNeeded()
         dictationController.shutdown()
         CorrectionLearningMonitor.shared.cancel()
@@ -209,6 +215,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setupCorrectionLearning() {
         CorrectionLearningMonitor.shared.installEventMonitors()
+    }
+
+    private func setupVocabularySuggestionNotifications() {
+        vocabularySuggestionObserver = NotificationCenter.default.addObserver(
+            forName: .customVocabularySuggestionAdded,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            guard
+                let source = notification.userInfo?[CustomVocabularyManager.NotificationUserInfoKey.source] as? String,
+                let target = notification.userInfo?[CustomVocabularyManager.NotificationUserInfoKey.target] as? String
+            else {
+                return
+            }
+
+            Task { @MainActor [weak self] in
+                self?.statusBarController?.showVocabularySuggestionAddedNotification(
+                    source: source,
+                    target: target
+                )
+            }
+        }
     }
 
     private func setupDictationController() {

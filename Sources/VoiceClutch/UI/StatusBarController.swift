@@ -16,6 +16,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private var previousState: VoiceClutchState?
     private var notificationPopover: NSPopover?
     private var notificationDismissWorkItem: DispatchWorkItem?
+    private var tooltipResetWorkItem: DispatchWorkItem?
     private var currentMenuState: VoiceClutchState = .idle
     private var hasMissingPermissions = false
     private var previousHasMissingPermissions = false
@@ -23,6 +24,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private var currentDownloadModelLabel = "model"
     private var isStatusMenuOpen = false
     private var pendingPreferencesOpen = false
+    private var temporaryTooltip: String?
 
     init(
         onShortcutChanged: @escaping @MainActor (ListeningShortcut) -> Void,
@@ -132,7 +134,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
         applyToolbarOpacity(for: state, on: button)
         previousState = state
-        button.toolTip = tooltip(for: state)
+        button.toolTip = currentTooltip(for: state)
     }
 
     func updateMenu(for state: VoiceClutchState) {
@@ -223,6 +225,12 @@ class StatusBarController: NSObject, NSMenuDelegate {
         notificationDismissWorkItem = dismissWorkItem
 
         DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: dismissWorkItem)
+    }
+
+    func showVocabularySuggestionAddedNotification(source: String, target: String, duration: TimeInterval = 4.0) {
+        let message = "New vocabulary suggestion\n\(source) → \(target)"
+        showToolbarNotification(message, duration: duration)
+        showTemporaryTooltip(message, duration: duration)
     }
 
     private func makeNotificationViewController(message: String) -> NSViewController {
@@ -476,6 +484,10 @@ class StatusBarController: NSObject, NSMenuDelegate {
         }
     }
 
+    private func currentTooltip(for state: VoiceClutchState) -> String {
+        temporaryTooltip ?? tooltip(for: state)
+    }
+
     private func tooltip(for state: VoiceClutchState) -> String {
         switch state {
         case .idle:
@@ -491,6 +503,21 @@ class StatusBarController: NSObject, NSMenuDelegate {
         case .warmingUp:
             return "VoiceClutch: Warming up ASR"
         }
+    }
+
+    private func showTemporaryTooltip(_ message: String, duration: TimeInterval) {
+        temporaryTooltip = message
+        statusItem.button?.toolTip = currentTooltip(for: currentMenuState)
+
+        tooltipResetWorkItem?.cancel()
+        let resetWorkItem = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.temporaryTooltip = nil
+            self.statusItem.button?.toolTip = self.currentTooltip(for: self.currentMenuState)
+            self.tooltipResetWorkItem = nil
+        }
+        tooltipResetWorkItem = resetWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: resetWorkItem)
     }
 
     private func downloadingTitle() -> String {
