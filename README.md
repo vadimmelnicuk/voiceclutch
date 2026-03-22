@@ -33,7 +33,7 @@ Private, on-device voice dictation for macOS with low-latency streaming transcri
 ## Getting Started
 
 1. Use the menu bar icon to confirm VoiceClutch is ready.
-2. Press and hold the default shortcut `Left Option` to dictate in hold-to-talk mode.
+2. Press and hold the default shortcut `Left Control` to dictate in hold-to-talk mode.
 3. Release to finish dictation and inject text into the active field.
 4. Open `Preferences` from the menu bar to change shortcut, interaction mode, and optional features.
 

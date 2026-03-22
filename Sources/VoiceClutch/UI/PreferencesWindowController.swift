@@ -39,6 +39,7 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private let autoAddCorrectionsSwitch = NSSwitch(frame: .zero)
     private let smartFormattingSwitch = NSSwitch(frame: .zero)
     private let clipboardContextFormattingSwitch = NSSwitch(frame: .zero)
+    private let startOnLoginSwitch = NSSwitch(frame: .zero)
     private let accessibilityPermissionIndicator = NSView()
     private let accessibilityPermissionButton = NSButton(title: "Grant", target: nil, action: nil)
     private let microphonePermissionIndicator = NSView()
@@ -253,6 +254,14 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
             showsSeparator: false
         )
 
+        configureToggle(startOnLoginSwitch, action: #selector(startOnLoginPreferenceChanged(_:)))
+        syncStartOnLoginPreference()
+        let startOnLoginRow = makeSettingsRow(
+            title: "Start on login",
+            detail: "Launch VoiceClutch automatically when you log in to macOS.",
+            control: startOnLoginSwitch
+        )
+
         let currentVersion = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0"
         let updateButton = NSButton(title: "Check now", target: self, action: #selector(checkForUpdates))
         updateButton.bezelStyle = .rounded
@@ -286,6 +295,7 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         )
 
         let permissionsGroup = makeSettingsGroup(rows: [
+            startOnLoginRow,
             accessibilityPermissionRow,
             microphonePermissionRow
         ])
@@ -691,6 +701,10 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         clipboardContextFormattingSwitch.state = ClipboardContextFormattingPreference.load() ? .on : .off
     }
 
+    private func syncStartOnLoginPreference() {
+        startOnLoginSwitch.state = StartOnLoginPreference.load() ? .on : .off
+    }
+
     private func bindPermissionUpdates() {
         permissionsCoordinator.$snapshot
             .receive(on: DispatchQueue.main)
@@ -975,6 +989,11 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         ClipboardContextFormattingPreference.save(sender.state == .on)
     }
 
+    @objc private func startOnLoginPreferenceChanged(_ sender: NSSwitch) {
+        _ = StartOnLoginPreference.setEnabled(sender.state == .on)
+        syncStartOnLoginPreference()
+    }
+
     @objc private func accessibilityPermissionButtonPressed() {
         if permissionsCoordinator.accessibilityGranted {
             permissionsCoordinator.openAccessibilitySettings()
@@ -1176,6 +1195,7 @@ class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         syncAutoAddCorrectionsPreference()
         syncSmartFormattingPreference()
         syncClipboardContextFormattingPreference()
+        syncStartOnLoginPreference()
         permissionsCoordinator.refreshNow()
         updateVocabularyBadge()
         enforceFixedWindowFrame()

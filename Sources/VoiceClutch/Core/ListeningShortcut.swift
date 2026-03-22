@@ -14,7 +14,7 @@ public enum ListeningShortcut: String, CaseIterable, Sendable {
     private static let defaultsKey = "listeningShortcut"
     private static let customConfigKey = "listeningShortcutCustomConfig"
 
-    static let defaultValue: ListeningShortcut = .leftOption
+    static let defaultValue: ListeningShortcut = .control
 
     var displayName: String {
         switch self {

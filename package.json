@@ -4,6 +4,7 @@
   "scripts": {
     "build:debug": "./Scripts/build.sh",
     "build:production": "./Scripts/build.sh --production",
+    "bundle": "./Scripts/bundle.sh",
     "test": "./Scripts/test.sh"
   }
 }

@@ -85,6 +85,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide dock icon (LSUIElement behavior)
         NSApp.setActivationPolicy(.accessory)
+        StartOnLoginPreference.applyPreferredSetting()
 
         setupStatusBar()
         setupCorrectionLearning()

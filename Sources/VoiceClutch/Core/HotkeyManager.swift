@@ -364,10 +364,10 @@ public struct HotkeyConfig: Sendable, Equatable {
         return trimmed.isEmpty ? nil : trimmed
     }
     
-    // Default: Left Option key alone
+    // Default: Left Control key alone
     public static func `default`() -> HotkeyConfig {
         HotkeyConfig(
-            keyCode: optionKey,
+            keyCode: controlKey,
             modifiers: 0  // No modifiers for single key
         )
     }
