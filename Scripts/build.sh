@@ -109,6 +109,28 @@ require_command() {
     fi
 }
 
+codesign_with_hints() {
+    local target="$1"
+    shift
+
+    local output
+    if ! output=$(codesign "$@" "$target" 2>&1); then
+        if [ -n "$output" ]; then
+            echo "$output" >&2
+        fi
+        if echo "$output" | grep -q "errSecInternalComponent"; then
+            echo "Hint: errSecInternalComponent often means a keychain trust/access issue." >&2
+            echo "Hint: verify your Developer ID cert chain and private-key access in Keychain Access." >&2
+            echo "Hint: if running from automation, ensure the keychain is unlocked and codesign is allowed to use the key." >&2
+        fi
+        fail "codesign failed for ${target}"
+    fi
+
+    if [ -n "$output" ]; then
+        echo "$output"
+    fi
+}
+
 validate_production_certification_requirements() {
     if [ "$BUILD_FOR_PRODUCTION" != true ]; then
         return
@@ -154,28 +176,58 @@ validate_production_certification_requirements() {
 sign_nested_code() {
     local app_path="$1"
     local target
+    local bundle_path
+    local bundle_executable
+    local bundle_executable_path
     local count=0
 
+    # Sign binary code payloads first.
     while IFS= read -r target; do
         if [ -z "$target" ] || [ "$target" = "$app_path" ]; then
             continue
         fi
 
         echo "🔏 Signing nested target: ${target}"
-        codesign \
+        codesign_with_hints "$target" \
             --force \
             --timestamp \
-            --sign "$SIGN_IDENTITY" \
-            "$target"
+            --sign "$SIGN_IDENTITY"
         count=$((count + 1))
     done < <(
         find "$app_path" -depth \
             \( \
-                -type d \( -name "*.framework" -o -name "*.app" -o -name "*.bundle" -o -name "*.xpc" \) \
+                -type d \( -name "*.framework" -o -name "*.app" -o -name "*.xpc" \) \
                 -o -type f \( -name "*.dylib" -o -name "*.so" \) \
             \) \
             -print
     )
+
+    # Only sign loadable bundles that declare an executable.
+    while IFS= read -r bundle_path; do
+        if [ -z "$bundle_path" ]; then
+            continue
+        fi
+
+        bundle_executable=""
+        if [ -f "$bundle_path/Contents/Info.plist" ]; then
+            bundle_executable=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$bundle_path/Contents/Info.plist" 2>/dev/null || true)
+        fi
+        if [ -z "$bundle_executable" ]; then
+            continue
+        fi
+
+        bundle_executable_path="$bundle_path/Contents/MacOS/$bundle_executable"
+        if [ ! -f "$bundle_executable_path" ]; then
+            continue
+        fi
+
+        echo "🔏 Signing loadable bundle: ${bundle_path}"
+        codesign_with_hints "$bundle_path" \
+            --force \
+            --timestamp \
+            --sign "$SIGN_IDENTITY"
+        count=$((count + 1))
+    done < <(find "$app_path" -depth -type d -name "*.bundle" -print)
 
     echo "✅ Signed ${count} nested code target(s)"
 }
@@ -183,12 +235,18 @@ sign_nested_code() {
 verify_signing_and_gatekeeper() {
     local app_path="$1"
     local phase="$2"
+    local enforce_gatekeeper="${3:-true}"
 
     echo "🔎 Verifying code signature (${phase})..."
     codesign --verify --deep --strict --verbose=2 "$app_path"
 
     echo "🛡️  Running Gatekeeper assessment (${phase})..."
-    spctl --assess --type execute --verbose=4 "$app_path"
+    if ! spctl --assess --type execute --verbose=4 "$app_path"; then
+        if [ "$enforce_gatekeeper" = true ]; then
+            fail "Gatekeeper assessment failed (${phase})."
+        fi
+        echo "⚠️  Gatekeeper rejected app during ${phase}. This is expected before notarization; continuing."
+    fi
 }
 
 notarize_and_staple() {
@@ -238,17 +296,16 @@ certify_production_app_bundle() {
     sign_nested_code "$app_path"
 
     echo "🔏 Signing app bundle with Hardened Runtime..."
-    codesign \
+    codesign_with_hints "$app_path" \
         --deep \
         --force \
         --timestamp \
         --options runtime \
-        --sign "$SIGN_IDENTITY" \
-        "$app_path"
+        --sign "$SIGN_IDENTITY"
 
-    verify_signing_and_gatekeeper "$app_path" "pre-notarization"
+    verify_signing_and_gatekeeper "$app_path" "pre-notarization" "false"
     notarize_and_staple "$app_path" "$archive_path"
-    verify_signing_and_gatekeeper "$app_path" "post-stapling"
+    verify_signing_and_gatekeeper "$app_path" "post-stapling" "true"
 
     app_abs_path="$(cd "$(dirname "$app_path")" && pwd -P)/$(basename "$app_path")"
     archive_abs_path="$(cd "$(dirname "$archive_path")" && pwd -P)/$(basename "$archive_path")"
