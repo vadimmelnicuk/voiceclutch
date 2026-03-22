@@ -475,7 +475,7 @@ public class HotkeyManager: @unchecked Sendable {
             eventsOfInterest: CGEventMask(eventMask),
             callback: { proxy, type, event, refcon in
                 guard let refcon = refcon else {
-                    return Unmanaged.passRetained(event)
+                    return Unmanaged.passUnretained(event)
                 }
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
                 return manager.handleCGEvent(proxy: proxy, type: type, event: event)
@@ -523,11 +523,37 @@ public class HotkeyManager: @unchecked Sendable {
     // MARK: - Event Handling
 
     private func handleCGEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            var callbackToEmit: HotkeyCallback?
+            var shouldEmitRelease = false
+            var tapToEnable: CFMachPort?
+
+            queue.sync {
+                callbackToEmit = self.callback
+                tapToEnable = self.eventTap
+                self.pressedKeyCodes.removeAll()
+                if self.isPressed {
+                    self.isPressed = false
+                    shouldEmitRelease = true
+                }
+            }
+
+            if let tapToEnable {
+                CGEvent.tapEnable(tap: tapToEnable, enable: true)
+            }
+
+            if shouldEmitRelease {
+                invokeCallback(.released, callbackToEmit)
+            }
+
+            return Unmanaged.passUnretained(event)
+        }
+
         // Ignore synthetic events emitted by TextInjector to avoid re-entrant
         // hotkey press/release transitions while streaming text updates.
         let sourceTag = event.getIntegerValueField(.eventSourceUserData)
         if sourceTag == TextInjector.syntheticEventTag {
-            return Unmanaged.passRetained(event)
+            return Unmanaged.passUnretained(event)
         }
         
         let keyCode = UInt32(event.getIntegerValueField(.keyboardEventKeycode))
@@ -552,7 +578,8 @@ public class HotkeyManager: @unchecked Sendable {
                     return
                 }
 
-                if isSpecificModifierPressed(flags, keyCode: keyCode) {
+                let wasPressed = pressedKeyCodes.contains(keyCode)
+                if isSpecificModifierPressed(flags, keyCode: keyCode, wasPressed: wasPressed) {
                     pressedKeyCodes.insert(keyCode)
                 } else {
                     pressedKeyCodes.remove(keyCode)
@@ -587,7 +614,7 @@ public class HotkeyManager: @unchecked Sendable {
             rawEventObserverToEmit(observedKeyEvent)
         }
 
-        return Unmanaged.passRetained(event)
+        return Unmanaged.passUnretained(event)
     }
     
     private func invokeCallback(_ eventType: HotkeyEventType, _ callback: HotkeyCallback?) {
@@ -642,9 +669,21 @@ public class HotkeyManager: @unchecked Sendable {
     
     // MARK: - Helper Methods
     
-    private func isSpecificModifierPressed(_ flags: CGEventFlags, keyCode: UInt32) -> Bool {
+    private func isSpecificModifierPressed(
+        _ flags: CGEventFlags,
+        keyCode: UInt32,
+        wasPressed: Bool
+    ) -> Bool {
         guard let modifierFlag = HotkeyConfig.modifierFlagsByKeyCode[keyCode] else { return false }
-        return flags.contains(modifierFlag)
+
+        // flagsChanged reports aggregate modifier bits (left/right merged). When
+        // the aggregate bit remains set, use transition history for this keyCode
+        // to disambiguate press vs release of each physical side.
+        if !flags.contains(modifierFlag) {
+            return false
+        }
+
+        return !wasPressed
     }
     
     // MARK: - State Queries

@@ -2,7 +2,7 @@
 
 <img src="Resources/VoiceClutch.png" alt="VoiceClutch" style="max-width: 200px;" />
 
-Private, on-device voice dictation for macOS with low-latency streaming transcription and an optional LLM-powered corrections.
+Private, on-device voice dictation for macOS with low-latency streaming transcription and LLM-powered corrections.
 
 - **Stay in flow** - Dictate naturally with low-latency streaming and quick text injection into any active app.
 - **Get cleaner output** - Optional LLM final pass improves punctuation, structure, and readability before insertion.
