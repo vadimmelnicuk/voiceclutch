@@ -1,6 +1,12 @@
 # VoiceClutch
 
-Local, on-device voice dictation for macOS with fast streaming transcription.
+<img src="Resources/VoiceClutch.png" alt="VoiceClutch" style="max-width: 200px;" />
+
+Private, on-device voice dictation for macOS with low-latency streaming transcription and an optional LLM-powered corrections.
+
+- **Stay in flow** - Dictate naturally with low-latency streaming and quick text injection into any active app.
+- **Get cleaner output** - Optional LLM final pass improves punctuation, structure, and readability before insertion.
+- **Keep your data local** - Speech recognition and transcript cleanup run on-device for privacy-first usage.
 
 ## Features
 
@@ -27,9 +33,9 @@ Local, on-device voice dictation for macOS with fast streaming transcription.
 ## Getting Started
 
 1. Use the menu bar icon to confirm VoiceClutch is ready.
-2. Press and hold the default shortcut (**Left Option**) to dictate in hold-to-talk mode.
+2. Press and hold the default shortcut `Left Option` to dictate in hold-to-talk mode.
 3. Release to finish dictation and inject text into the active field.
-4. Open **Preferences** from the menu bar to change shortcut, interaction mode, and optional features.
+4. Open `Preferences` from the menu bar to change shortcut, interaction mode, and optional features.
 
 ## Acknowledgements
 
