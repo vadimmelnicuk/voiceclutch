@@ -70,8 +70,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         static let hotkeyNeedsAccessibility = "Enable Accessibility permission to activate the listening shortcut"
         static let hotkeyRequiresAccessibility = "Accessibility permission is required for global hotkeys"
         static let hotkeyInvalidShortcut = "Could not register listening shortcut\nChoose another key combination"
-        static let permissionsMissing = "Permissions missing\nComplete setup to continue dictation"
-        static let micPermissionPending = "Microphone permission is pending\nComplete setup to continue dictation"
+        static let permissionsMissing = "Permissions missing\nComplete setup to use dictation"
+        static let micPermissionPending = "Microphone permission is pending\nComplete setup to use dictation"
         static let micPermissionDenied = "Microphone permission is denied\nOpen System Settings to allow access"
         static let micPermissionUnknown = "Microphone permission status is unknown"
     }

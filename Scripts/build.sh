@@ -81,6 +81,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 APP_NAME="VoiceClutch"
+PRODUCTION_BUNDLE_IDENTIFIER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "Resources/Info.plist" 2>/dev/null || true)
+if [ -z "$PRODUCTION_BUNDLE_IDENTIFIER" ]; then
+    PRODUCTION_BUNDLE_IDENTIFIER="com.vadimmelnicuk.voiceclutch"
+fi
+DEBUG_BUNDLE_IDENTIFIER="${PRODUCTION_BUNDLE_IDENTIFIER}.debug"
+PRODUCTION_BUNDLE_NAME="${APP_NAME}"
+DEBUG_BUNDLE_NAME="${APP_NAME} Debug"
+HARDENED_RUNTIME_ENTITLEMENTS="Resources/VoiceClutch.entitlements"
 if [ "$BUILD_FOR_PRODUCTION" = true ]; then
     APP_BUNDLE="${APP_NAME}.app"
     BUILD_DIR=".build/release"
@@ -107,6 +115,36 @@ require_command() {
     if ! command -v "$cmd" >/dev/null 2>&1; then
         fail "Required command not found: ${cmd}"
     fi
+}
+
+set_plist_string_value() {
+    local plist_path="$1"
+    local key="$2"
+    local value="$3"
+
+    if /usr/libexec/PlistBuddy -c "Print :${key}" "$plist_path" >/dev/null 2>&1; then
+        plutil -replace "$key" -string "$value" "$plist_path"
+    else
+        plutil -insert "$key" -string "$value" "$plist_path"
+    fi
+}
+
+configure_app_bundle_identity() {
+    local plist_path="$1"
+    local bundle_identifier
+    local bundle_name
+
+    if [ "$BUILD_FOR_PRODUCTION" = true ]; then
+        bundle_identifier="$PRODUCTION_BUNDLE_IDENTIFIER"
+        bundle_name="$PRODUCTION_BUNDLE_NAME"
+    else
+        bundle_identifier="$DEBUG_BUNDLE_IDENTIFIER"
+        bundle_name="$DEBUG_BUNDLE_NAME"
+    fi
+
+    set_plist_string_value "$plist_path" "CFBundleIdentifier" "$bundle_identifier"
+    set_plist_string_value "$plist_path" "CFBundleName" "$bundle_name"
+    set_plist_string_value "$plist_path" "CFBundleDisplayName" "$bundle_name"
 }
 
 codesign_with_hints() {
@@ -144,6 +182,10 @@ validate_production_certification_requirements() {
     require_command spctl
     require_command xcrun
     require_command ditto
+
+    if [ ! -f "$HARDENED_RUNTIME_ENTITLEMENTS" ]; then
+        fail "Missing entitlements file required for production signing: ${HARDENED_RUNTIME_ENTITLEMENTS}"
+    fi
 
     if ! xcrun --find notarytool >/dev/null 2>&1; then
         fail "xcrun notarytool is not available. Install Xcode command line tools with notarization support."
@@ -301,6 +343,7 @@ certify_production_app_bundle() {
         --force \
         --timestamp \
         --options runtime \
+        --entitlements "$HARDENED_RUNTIME_ENTITLEMENTS" \
         --sign "$SIGN_IDENTITY"
 
     verify_signing_and_gatekeeper "$app_path" "pre-notarization" "false"
@@ -547,7 +590,9 @@ cp "${EXECUTABLE}" "${APP_BUNDLE}/Contents/MacOS/"
 
 # Copy Info.plist
 if [ -f "Resources/Info.plist" ]; then
-    cp "Resources/Info.plist" "${APP_BUNDLE}/Contents/"
+    APP_PLIST_PATH="${APP_BUNDLE}/Contents/Info.plist"
+    cp "Resources/Info.plist" "${APP_PLIST_PATH}"
+    configure_app_bundle_identity "${APP_PLIST_PATH}"
 else
     echo "⚠️  Warning: Resources/Info.plist not found"
 fi
@@ -619,6 +664,9 @@ if [ "$BUILD_FOR_PRODUCTION" = true ]; then
     echo "📦 Production bundle created."
     echo "   The app is ready for Developer ID distribution."
 else
+    echo "🔏 Applying stable ad-hoc signature for debug app identity..."
+    codesign --force --deep --sign - --identifier "$DEBUG_BUNDLE_IDENTIFIER" "${APP_BUNDLE}"
+
     echo ""
     echo "🚀 Launching app in debug mode (logs will appear in terminal)..."
     echo "Press Ctrl+C to stop the app"

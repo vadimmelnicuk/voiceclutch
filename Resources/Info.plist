@@ -5,7 +5,7 @@
     <key>CFBundleExecutable</key>
     <string>VoiceClutch</string>
     <key>CFBundleIdentifier</key>
-    <string>dev.vm.voiceclutch</string>
+    <string>com.vadimmelnicuk.voiceclutch</string>
     <key>CFBundleName</key>
     <string>VoiceClutch</string>
     <key>CFBundleIconFile</key>
