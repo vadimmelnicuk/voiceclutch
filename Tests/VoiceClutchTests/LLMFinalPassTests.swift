@@ -1251,6 +1251,24 @@ final class ClipboardContextPromptBuilderTests: XCTestCase {
 
 @MainActor
 final class DictationControllerClipboardContextTests: XCTestCase {
+    func testTranscriptDiffPairs_mergesAdjacentTokenReplacement() {
+        let pairs = DictationController.transcriptDiffPairs(
+            before: "Let's use voice clutch",
+            after: "Let's use VoiceClutch"
+        )
+
+        XCTAssertEqual(pairs, ["voice clutch -> VoiceClutch"])
+    }
+
+    func testTranscriptDiffPairs_reportsEachReplacementPair() {
+        let pairs = DictationController.transcriptDiffPairs(
+            before: "term1 and term2",
+            after: "TERM1 and TERM2"
+        )
+
+        XCTAssertEqual(pairs, ["term1 -> TERM1", "term2 -> TERM2"])
+    }
+
     func testMakeClipboardContextPreview_returnsNilForEmptyInput() {
         XCTAssertNil(DictationController.makeClipboardContextPreview(from: nil))
         XCTAssertNil(DictationController.makeClipboardContextPreview(from: " \n\t  "))

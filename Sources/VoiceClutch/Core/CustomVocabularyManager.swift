@@ -32,31 +32,22 @@ struct ShortcutVocabularyEntry: Codable, Hashable, Sendable {
 }
 
 struct LearnedCorrectionRule: Codable, Hashable, Sendable {
-    static let promotionThreshold = 1
-
     let id: UUID
     let source: String
     let target: String
-    var count: Int
     let createdAt: Date
     var updatedAt: Date
-
-    var isPromoted: Bool {
-        count >= Self.promotionThreshold
-    }
 
     init(
         id: UUID = UUID(),
         source: String,
         target: String,
-        count: Int,
         createdAt: Date = Date(),
         updatedAt: Date = Date()
     ) {
         self.id = id
         self.source = source
         self.target = target
-        self.count = count
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -162,6 +153,8 @@ enum CustomVocabularyError: LocalizedError {
     case invalidReplacementText
     case invalidShortcutEntry
     case entryNotFound
+    case invalidImportDocument
+    case unsupportedImportDocumentVersion(Int)
 
     var errorDescription: String? {
         switch self {
@@ -175,12 +168,57 @@ enum CustomVocabularyError: LocalizedError {
             return "Enter one shortcut using `trigger => replacement`."
         case .entryNotFound:
             return "This vocabulary entry no longer exists."
+        case .invalidImportDocument:
+            return "Choose a valid VoiceClutch vocabulary export file."
+        case .unsupportedImportDocumentVersion(let version):
+            return "This vocabulary file uses unsupported schema version \(version)."
         }
     }
 }
 
 final class CustomVocabularyManager: @unchecked Sendable {
     static let shared = CustomVocabularyManager()
+
+    private struct PortableVocabularyDocument: Codable {
+        static let currentSchemaVersion = 1
+
+        let schemaVersion: Int
+        let manualEntries: [PortableManualEntry]
+        let shortcutEntries: [PortableShortcutEntry]
+        let learnedRules: [PortableLearnedRule]
+    }
+
+    private struct PortableManualEntry: Codable {
+        let canonical: String
+        let aliases: [String]
+    }
+
+    private struct PortableShortcutEntry: Codable {
+        let trigger: String
+        let replacement: String
+    }
+
+    private struct PortableLearnedRule: Codable {
+        let source: String
+        let target: String
+    }
+
+    private struct PortableShortcutRecord {
+        let key: String
+        let trigger: String
+        let replacement: String
+    }
+
+    private struct PortableLearnedRecord {
+        struct Key: Hashable {
+            let source: String
+            let target: String
+        }
+
+        let key: Key
+        let source: String
+        let target: String
+    }
 
     private struct PersistedState: Codable {
         var schemaVersion: Int
@@ -291,6 +329,169 @@ final class CustomVocabularyManager: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return Self.snapshot(from: state)
+    }
+
+    func exportPortableVocabulary() throws -> Data {
+        let currentSnapshot = snapshot()
+        let document = PortableVocabularyDocument(
+            schemaVersion: PortableVocabularyDocument.currentSchemaVersion,
+            manualEntries: currentSnapshot.manualEntries.map { entry in
+                PortableManualEntry(canonical: entry.canonical, aliases: entry.aliases)
+            },
+            shortcutEntries: currentSnapshot.shortcutEntries.map { entry in
+                PortableShortcutEntry(trigger: entry.trigger, replacement: entry.replacement)
+            },
+            learnedRules: currentSnapshot.learnedRules.map { rule in
+                PortableLearnedRule(source: rule.source, target: rule.target)
+            }
+        )
+        let json = try Self.formattedPortableJSONString(for: document)
+        return Data(json.utf8)
+    }
+
+    @discardableResult
+    func importPortableVocabulary(_ data: Data) throws -> CustomVocabularySnapshot {
+        let decoder = JSONDecoder()
+        let document: PortableVocabularyDocument
+        do {
+            document = try decoder.decode(PortableVocabularyDocument.self, from: data)
+        } catch {
+            throw CustomVocabularyError.invalidImportDocument
+        }
+
+        guard document.schemaVersion == PortableVocabularyDocument.currentSchemaVersion else {
+            throw CustomVocabularyError.unsupportedImportDocumentVersion(document.schemaVersion)
+        }
+
+        let importedManualEntries = Self.sanitizedPortableManualEntries(document.manualEntries)
+        let importedShortcuts = Self.sanitizedPortableShortcutRecords(document.shortcutEntries)
+        let importedLearnedRules = Self.sanitizedPortableLearnedRecords(document.learnedRules)
+
+        let snapshot = try mutateState { state in
+            let now = Date()
+
+            var manualByKey: [String: ManualVocabularyEntry] = [:]
+            for entry in state.manualEntries {
+                let normalizedCanonical = Self.normalizedLookupKey(entry.canonical)
+                guard !normalizedCanonical.isEmpty else { continue }
+                manualByKey[normalizedCanonical] = entry
+            }
+            for entry in importedManualEntries {
+                let normalizedCanonical = Self.normalizedLookupKey(entry.canonical)
+                guard !normalizedCanonical.isEmpty else { continue }
+                manualByKey[normalizedCanonical] = entry
+            }
+            state.manualEntries = Self.mergeManualEntries(Array(manualByKey.values))
+
+            let importedShortcutsByKey = Dictionary(
+                uniqueKeysWithValues: importedShortcuts.map { ($0.key, $0) }
+            )
+            var matchedShortcutKeys = Set<String>()
+            var mergedShortcuts: [ShortcutVocabularyEntry] = []
+            for existingEntry in state.shortcutEntries {
+                let key = Self.normalizedLookupKey(existingEntry.trigger)
+                if let importedEntry = importedShortcutsByKey[key] {
+                    mergedShortcuts.append(
+                        ShortcutVocabularyEntry(
+                            id: existingEntry.id,
+                            trigger: importedEntry.trigger,
+                            replacement: importedEntry.replacement,
+                            createdAt: existingEntry.createdAt,
+                            updatedAt: now
+                        )
+                    )
+                    matchedShortcutKeys.insert(key)
+                } else {
+                    mergedShortcuts.append(existingEntry)
+                }
+            }
+            for importedEntry in importedShortcuts where !matchedShortcutKeys.contains(importedEntry.key) {
+                mergedShortcuts.append(
+                    ShortcutVocabularyEntry(
+                        trigger: importedEntry.trigger,
+                        replacement: importedEntry.replacement,
+                        createdAt: now,
+                        updatedAt: now
+                    )
+                )
+            }
+            state.shortcutEntries = mergedShortcuts
+
+            let importedLearnedByKey = Dictionary(
+                uniqueKeysWithValues: importedLearnedRules.map { ($0.key, $0) }
+            )
+            var matchedLearnedKeys = Set<PortableLearnedRecord.Key>()
+            var mergedLearnedRules: [LearnedCorrectionRule] = []
+            for existingRule in state.learnedRules {
+                let sourceKey = Self.normalizedLookupKey(existingRule.source)
+                let targetKey = Self.normalizedLookupKey(existingRule.target)
+                let key = PortableLearnedRecord.Key(source: sourceKey, target: targetKey)
+                if let importedRule = importedLearnedByKey[key] {
+                    mergedLearnedRules.append(
+                        LearnedCorrectionRule(
+                            id: existingRule.id,
+                            source: importedRule.source,
+                            target: importedRule.target,
+                            createdAt: existingRule.createdAt,
+                            updatedAt: now
+                        )
+                    )
+                    matchedLearnedKeys.insert(key)
+                } else {
+                    mergedLearnedRules.append(existingRule)
+                }
+            }
+            for importedRule in importedLearnedRules where !matchedLearnedKeys.contains(importedRule.key) {
+                mergedLearnedRules.append(
+                    LearnedCorrectionRule(
+                        source: importedRule.source,
+                        target: importedRule.target,
+                        createdAt: now,
+                        updatedAt: now
+                    )
+                )
+            }
+            state.learnedRules = mergedLearnedRules
+        }
+        logger.info(
+            "Imported portable vocabulary (\(importedManualEntries.count) manual, \(importedShortcuts.count) shortcut, \(importedLearnedRules.count) learned)"
+        )
+        return snapshot
+    }
+
+    private static func formattedPortableJSONString(for document: PortableVocabularyDocument) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+
+        let manualJSON = try encodePortableArrayOnSeparateLines(document.manualEntries, using: encoder)
+        let shortcutJSON = try encodePortableArrayOnSeparateLines(document.shortcutEntries, using: encoder)
+        let learnedJSON = try encodePortableArrayOnSeparateLines(document.learnedRules, using: encoder)
+
+        return """
+        {
+          "schemaVersion": \(document.schemaVersion),
+          "manualEntries": \(manualJSON),
+          "shortcutEntries": \(shortcutJSON),
+          "learnedRules": \(learnedJSON)
+        }
+        """
+    }
+
+    private static func encodePortableArrayOnSeparateLines<T: Encodable>(
+        _ values: [T],
+        using encoder: JSONEncoder
+    ) throws -> String {
+        guard !values.isEmpty else { return "[]" }
+
+        let lines = try values.map { value in
+            String(decoding: try encoder.encode(value), as: UTF8.self)
+        }
+
+        return """
+        [
+        \(lines.map { "    \($0)" }.joined(separator: ",\n"))
+          ]
+        """
     }
 
     @discardableResult
@@ -479,7 +680,6 @@ final class CustomVocabularyManager: @unchecked Sendable {
                 id: id,
                 source: sanitizedSource,
                 target: sanitizedTarget,
-                count: max(1, state.learnedRules[index].count),
                 createdAt: state.learnedRules[index].createdAt,
                 updatedAt: now
             )
@@ -523,14 +723,12 @@ final class CustomVocabularyManager: @unchecked Sendable {
                     && Self.sanitizedTerm($0.source) == sanitizedSource
                     && Self.sanitizedTerm($0.target) == sanitizedTarget
             }) {
-                state.learnedRules[index].count += 1
                 state.learnedRules[index].updatedAt = now
             } else {
                 state.learnedRules.append(
                     LearnedCorrectionRule(
                         source: sanitizedSource,
                         target: sanitizedTarget,
-                        count: 1,
                         createdAt: now,
                         updatedAt: now
                     )
@@ -544,8 +742,7 @@ final class CustomVocabularyManager: @unchecked Sendable {
     @discardableResult
     func upsertLearnedRule(
         source: String,
-        target: String,
-        count: Int = 1
+        target: String
     ) throws -> CustomVocabularySnapshot {
         let sanitizedSource = Self.sanitizedTerm(source)
         let sanitizedTarget = Self.sanitizedTerm(target)
@@ -565,14 +762,12 @@ final class CustomVocabularyManager: @unchecked Sendable {
                 Self.normalizedLookupKey($0.source) == normalizedSource
                     && Self.normalizedLookupKey($0.target) == normalizedTarget
             }) {
-                state.learnedRules[index].count = max(1, state.learnedRules[index].count, count)
                 state.learnedRules[index].updatedAt = now
             } else {
                 state.learnedRules.append(
                     LearnedCorrectionRule(
                         source: sanitizedSource,
                         target: sanitizedTarget,
-                        count: max(1, count),
                         createdAt: now,
                         updatedAt: now
                     )
@@ -694,14 +889,12 @@ final class CustomVocabularyManager: @unchecked Sendable {
                 Self.normalizedLookupKey($0.source) == normalizedSource &&
                     Self.normalizedLookupKey($0.target) == normalizedTarget
             }) {
-                state.learnedRules[learnedIndex].count = max(1, state.learnedRules[learnedIndex].count)
                 state.learnedRules[learnedIndex].updatedAt = now
             } else {
                 state.learnedRules.append(
                     LearnedCorrectionRule(
                         source: source,
                         target: target,
-                        count: 1,
                         createdAt: now,
                         updatedAt: now
                     )
@@ -821,16 +1014,7 @@ final class CustomVocabularyManager: @unchecked Sendable {
             }
         }
 
-        let promotedLearnedRules = snapshot.learnedRules
-            .filter(\.isPromoted)
-            .sorted { lhs, rhs in
-                if lhs.count == rhs.count {
-                    return lhs.updatedAt > rhs.updatedAt
-                }
-                return lhs.count > rhs.count
-            }
-
-        for learnedRule in promotedLearnedRules {
+        for learnedRule in snapshot.learnedRules.sorted(by: { $0.updatedAt > $1.updatedAt }) {
             let sources = parseCommaSeparatedTerms(learnedRule.source)
             if sources.isEmpty {
                 registerRule(source: learnedRule.source, replacement: learnedRule.target, priority: .learned)
@@ -919,7 +1103,7 @@ final class CustomVocabularyManager: @unchecked Sendable {
             addGlossary(preferred: entry.replacement, hint: entry.trigger)
         }
 
-        for learnedRule in snapshot.learnedRules where learnedRule.isPromoted {
+        for learnedRule in snapshot.learnedRules {
             addGlossary(preferred: learnedRule.target, hint: learnedRule.source)
         }
 
@@ -993,13 +1177,12 @@ final class CustomVocabularyManager: @unchecked Sendable {
 
     private static func snapshot(from state: PersistedState) -> CustomVocabularySnapshot {
         let sortedLearnedRules = state.learnedRules.sorted { lhs, rhs in
-            if lhs.isPromoted != rhs.isPromoted {
-                return lhs.isPromoted && !rhs.isPromoted
-            }
-            if lhs.count == rhs.count {
+            if lhs.updatedAt != rhs.updatedAt {
                 return lhs.updatedAt > rhs.updatedAt
             }
-            return lhs.count > rhs.count
+            let lhsKey = normalizedLookupKey(lhs.source) + "->" + normalizedLookupKey(lhs.target)
+            let rhsKey = normalizedLookupKey(rhs.source) + "->" + normalizedLookupKey(rhs.target)
+            return lhsKey < rhsKey
         }
 
         let sortedShortcuts = state.shortcutEntries.sorted { lhs, rhs in
@@ -1254,6 +1437,110 @@ final class CustomVocabularyManager: @unchecked Sendable {
         }
 
         return mergeManualEntries(parsedEntries)
+    }
+
+    private static func sanitizedPortableManualEntries(
+        _ entries: [PortableManualEntry]
+    ) -> [ManualVocabularyEntry] {
+        let sanitized = entries.compactMap { entry -> ManualVocabularyEntry? in
+            let canonical = sanitizedTerm(entry.canonical)
+            let normalizedCanonical = normalizedLookupKey(canonical)
+            guard !canonical.isEmpty, !normalizedCanonical.isEmpty else {
+                return nil
+            }
+
+            var dedupedAliases: [String] = []
+            var seenAliasKeys = Set<String>()
+            for alias in entry.aliases {
+                let sanitizedAlias = sanitizedTerm(alias)
+                let normalizedAlias = normalizedLookupKey(sanitizedAlias)
+                guard
+                    !sanitizedAlias.isEmpty,
+                    !normalizedAlias.isEmpty,
+                    normalizedAlias != normalizedCanonical,
+                    seenAliasKeys.insert(normalizedAlias).inserted
+                else {
+                    continue
+                }
+                dedupedAliases.append(sanitizedAlias)
+            }
+
+            return ManualVocabularyEntry(canonical: canonical, aliases: dedupedAliases)
+        }
+        return mergeManualEntries(sanitized)
+    }
+
+    private static func sanitizedPortableShortcutRecords(
+        _ entries: [PortableShortcutEntry]
+    ) -> [PortableShortcutRecord] {
+        var records: [PortableShortcutRecord] = []
+        var indexByKey: [String: Int] = [:]
+
+        for entry in entries {
+            let trigger = sanitizedTerm(entry.trigger)
+            let replacement = sanitizedTerm(entry.replacement)
+            let normalizedTrigger = normalizedLookupKey(trigger)
+            let normalizedReplacement = normalizedLookupKey(replacement)
+            guard
+                !normalizedTrigger.isEmpty,
+                !normalizedReplacement.isEmpty,
+                normalizedTrigger != normalizedReplacement
+            else {
+                continue
+            }
+
+            let record = PortableShortcutRecord(
+                key: normalizedTrigger,
+                trigger: trigger,
+                replacement: replacement
+            )
+
+            if let existingIndex = indexByKey[normalizedTrigger] {
+                records[existingIndex] = record
+            } else {
+                indexByKey[normalizedTrigger] = records.count
+                records.append(record)
+            }
+        }
+
+        return records
+    }
+
+    private static func sanitizedPortableLearnedRecords(
+        _ entries: [PortableLearnedRule]
+    ) -> [PortableLearnedRecord] {
+        var records: [PortableLearnedRecord] = []
+        var indexByKey: [PortableLearnedRecord.Key: Int] = [:]
+
+        for entry in entries {
+            let source = sanitizedTerm(entry.source)
+            let target = sanitizedTerm(entry.target)
+            let normalizedSource = normalizedLookupKey(source)
+            let normalizedTarget = normalizedLookupKey(target)
+            guard
+                !normalizedSource.isEmpty,
+                !normalizedTarget.isEmpty,
+                normalizedSource != normalizedTarget
+            else {
+                continue
+            }
+
+            let key = PortableLearnedRecord.Key(source: normalizedSource, target: normalizedTarget)
+            let record = PortableLearnedRecord(
+                key: key,
+                source: source,
+                target: target
+            )
+
+            if let existingIndex = indexByKey[key] {
+                records[existingIndex] = record
+            } else {
+                indexByKey[key] = records.count
+                records.append(record)
+            }
+        }
+
+        return records
     }
 
     private static func mergeManualEntries(_ entries: [ManualVocabularyEntry]) -> [ManualVocabularyEntry] {

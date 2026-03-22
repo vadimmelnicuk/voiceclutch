@@ -225,6 +225,7 @@ public final class DictationController: ObservableObject {
             let normalizedFinalText = TextInjector.normalizedStreamingTranscript(text)
             let stabilizedFinalText = stabilizedTranscript(normalizedFinalText, previous: latestPartialText)
             let fallbackText = !stabilizedFinalText.isEmpty ? stabilizedFinalText : latestPartialText
+            emitProvisionalFinalPreviewIfNeeded(fallbackText)
             let vocabularySnapshot = CustomVocabularyManager.shared.snapshot()
 
             finalProcessingTask?.cancel()
@@ -254,6 +255,10 @@ public final class DictationController: ObservableObject {
         latestPartialText = stabilizedPartialText
         guard shouldInjectPartial(stabilizedPartialText) else { return }
         TextInjector.updateStreamingPartialNormalized(stabilizedPartialText)
+    }
+
+    private func emitProvisionalFinalPreviewIfNeeded(_ normalizedTranscript: String) {
+        TextInjector.updateStreamingProvisionalFinalNormalized(normalizedTranscript)
     }
 
     private func finalizeTranscript(
@@ -299,19 +304,9 @@ public final class DictationController: ObservableObject {
             return false
         }
 
-        if shouldEmitTranscriptBodiesInLogs {
-            logger.debug(
-                """
-                tx.diff stage=\(stage) \(transcriptDiffSummary(before: before, after: after))
-                  before="\(redactedTranscriptPreview(before))"
-                  after="\(redactedTranscriptPreview(after))"
-                """
-            )
-        } else {
-            logger.debug(
-                "tx.diff stage=\(stage) \(transcriptDiffSummary(before: before, after: after))"
-            )
-        }
+        logger.debug(
+            "stage=\(stage) changes: \(transcriptDiffSummary(before: before, after: after))"
+        )
         return true
     }
 
@@ -341,10 +336,10 @@ public final class DictationController: ObservableObject {
         }
         let proposed = response.proposedTranscript
         guard !proposed.isEmpty else {
-            fields.append("llmFinalPass=empty")
+            fields.append("llm=empty")
             return """
             \(fields.joined(separator: " "))
-              asrPrompt="\(asrPrompt)"
+              asr="\(asrPrompt)"
             """
         }
 
@@ -356,8 +351,8 @@ public final class DictationController: ObservableObject {
         let llmFinalPass = redactedTranscriptPreview(proposed)
         return """
         \(fields.joined(separator: " "))
-          asrPrompt="\(asrPrompt)"
-          llmFinalPass="\(llmFinalPass)"
+          asr="\(asrPrompt)"
+          llm="\(llmFinalPass)"
         """
     }
 
@@ -389,29 +384,120 @@ public final class DictationController: ObservableObject {
     }
 
     private func transcriptDiffSummary(before: String, after: String) -> String {
-        let beforeCharacters = Array(before)
-        let afterCharacters = Array(after)
-        let sharedLength = min(beforeCharacters.count, afterCharacters.count)
-
-        var firstDifferenceIndex = 0
-        while firstDifferenceIndex < sharedLength,
-              beforeCharacters[firstDifferenceIndex] == afterCharacters[firstDifferenceIndex] {
-            firstDifferenceIndex += 1
+        let replacementPairs = Self.transcriptDiffPairs(before: before, after: after)
+        guard !replacementPairs.isEmpty else {
+            return "\(redactedTranscriptPreview(before)) -> \(redactedTranscriptPreview(after))"
         }
-
-        if firstDifferenceIndex == sharedLength, beforeCharacters.count == afterCharacters.count {
-            return "beforeLen=\(before.count) afterLen=\(after.count) firstDiff=none"
-        }
-
-        return "beforeLen=\(before.count) afterLen=\(after.count) firstDiff=\(firstDifferenceIndex)"
+        return replacementPairs.joined(separator: ", ")
     }
 
-    private var shouldEmitTranscriptBodiesInLogs: Bool {
-        #if DEBUG
-        true
-        #else
-        false
-        #endif
+    nonisolated static func transcriptDiffPairs(
+        before: String,
+        after: String,
+        maxPairs: Int = 5
+    ) -> [String] {
+        let beforeTokens = normalizedTokens(from: before)
+        let afterTokens = normalizedTokens(from: after)
+
+        guard beforeTokens != afterTokens else {
+            return []
+        }
+
+        let operations = tokenDiffOperations(beforeTokens: beforeTokens, afterTokens: afterTokens)
+
+        var replacements: [String] = []
+        var removedTokens: [String] = []
+        var addedTokens: [String] = []
+
+        func flushReplacement() {
+            guard !removedTokens.isEmpty || !addedTokens.isEmpty else {
+                return
+            }
+            let removed = removedTokens.isEmpty ? "<empty>" : removedTokens.joined(separator: " ")
+            let added = addedTokens.isEmpty ? "<empty>" : addedTokens.joined(separator: " ")
+            replacements.append("\(removed) -> \(added)")
+            removedTokens.removeAll(keepingCapacity: true)
+            addedTokens.removeAll(keepingCapacity: true)
+        }
+
+        for operation in operations {
+            switch operation {
+            case .equal:
+                flushReplacement()
+            case .delete(let token):
+                removedTokens.append(token)
+            case .insert(let token):
+                addedTokens.append(token)
+            }
+        }
+        flushReplacement()
+
+        guard replacements.count > maxPairs else {
+            return replacements
+        }
+
+        let visibleReplacements = replacements.prefix(maxPairs)
+        return Array(visibleReplacements) + ["... +\(replacements.count - maxPairs) more"]
+    }
+
+    private nonisolated static func normalizedTokens(from text: String) -> [String] {
+        text
+            .split(whereSeparator: \.isWhitespace)
+            .map(String.init)
+    }
+
+    private nonisolated static func tokenDiffOperations(
+        beforeTokens: [String],
+        afterTokens: [String]
+    ) -> [TokenDiffOperation] {
+        let beforeCount = beforeTokens.count
+        let afterCount = afterTokens.count
+        var lcs = Array(
+            repeating: Array(repeating: 0, count: afterCount + 1),
+            count: beforeCount + 1
+        )
+
+        for beforeIndex in 0..<beforeCount {
+            for afterIndex in 0..<afterCount {
+                if beforeTokens[beforeIndex] == afterTokens[afterIndex] {
+                    lcs[beforeIndex + 1][afterIndex + 1] = lcs[beforeIndex][afterIndex] + 1
+                } else {
+                    lcs[beforeIndex + 1][afterIndex + 1] = max(
+                        lcs[beforeIndex][afterIndex + 1],
+                        lcs[beforeIndex + 1][afterIndex]
+                    )
+                }
+            }
+        }
+
+        var reversedOperations: [TokenDiffOperation] = []
+        var beforeIndex = beforeCount
+        var afterIndex = afterCount
+
+        while beforeIndex > 0 || afterIndex > 0 {
+            if beforeIndex > 0,
+               afterIndex > 0,
+               beforeTokens[beforeIndex - 1] == afterTokens[afterIndex - 1] {
+                reversedOperations.append(.equal(beforeTokens[beforeIndex - 1]))
+                beforeIndex -= 1
+                afterIndex -= 1
+            } else if afterIndex > 0,
+                      (beforeIndex == 0 || lcs[beforeIndex][afterIndex - 1] >= lcs[beforeIndex - 1][afterIndex]) {
+                reversedOperations.append(.insert(afterTokens[afterIndex - 1]))
+                afterIndex -= 1
+            } else if beforeIndex > 0 {
+                reversedOperations.append(.delete(beforeTokens[beforeIndex - 1]))
+                beforeIndex -= 1
+            }
+        }
+
+        return reversedOperations.reversed()
+    }
+
+    private nonisolated enum TokenDiffOperation {
+        case equal(String)
+        case delete(String)
+        case insert(String)
     }
 
     private func resetPartialState() {

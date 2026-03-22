@@ -21,6 +21,21 @@ public struct ObservedKeyEvent: Sendable {
     public let keyCode: UInt32
     public let modifierFlagsRawValue: UInt64
     public let characters: String?
+    public let eventSourceUserData: Int64
+
+    public init(
+        kind: ObservedKeyEventKind,
+        keyCode: UInt32,
+        modifierFlagsRawValue: UInt64,
+        characters: String? = nil,
+        eventSourceUserData: Int64 = 0
+    ) {
+        self.kind = kind
+        self.keyCode = keyCode
+        self.modifierFlagsRawValue = modifierFlagsRawValue
+        self.characters = characters
+        self.eventSourceUserData = eventSourceUserData
+    }
 }
 
 // MARK: - Hotkey Configuration
@@ -600,7 +615,8 @@ public class HotkeyManager: @unchecked Sendable {
             kind: kind,
             keyCode: keyCode,
             modifierFlagsRawValue: event.flags.rawValue,
-            characters: extractCharacters(from: event)
+            characters: extractCharacters(from: event),
+            eventSourceUserData: event.getIntegerValueField(.eventSourceUserData)
         )
     }
 

@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 
 private enum VocabularyWindowMetrics {
     static let typeInset: CGFloat = 0
@@ -116,7 +117,7 @@ enum VocabularyListBuilder {
                 tertiary: "",
                 row: VocabularyListRow(
                     kind: .learned(rule.id),
-                    badgeText: rule.isPromoted ? "Learned" : "Learning",
+                    badgeText: "Learned",
                     badgeStyle: .learned,
                     sourceText: rule.source,
                     replacementText: rule.target,
@@ -179,6 +180,7 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
         static let contentColumnWidth: CGFloat = 183
         static let actionColumnWidth: CGFloat = 78
         static let contentInset: CGFloat = 16
+        static let cardContentInset: CGFloat = 16
         static let tableMinHeight: CGFloat = 332
         static let inputHeaderSpacing: CGFloat = 4
         static let inputToFieldSpacing: CGFloat = 10
@@ -304,8 +306,19 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
         doneButton.translatesAutoresizingMaskIntoConstraints = false
         doneButton.bezelStyle = .rounded
 
+        let importButton = makeFooterLinkButton(title: "Import", action: #selector(importVocabulary))
+        let exportButton = makeFooterLinkButton(title: "Export", action: #selector(exportVocabulary))
+        let footerLinksStack = NSStackView(views: [importButton, exportButton])
+        footerLinksStack.translatesAutoresizingMaskIntoConstraints = false
+        footerLinksStack.orientation = .horizontal
+        footerLinksStack.alignment = .centerY
+        footerLinksStack.spacing = 12
+        footerLinksStack.setContentHuggingPriority(.required, for: .horizontal)
+        footerLinksStack.setContentCompressionResistancePriority(.required, for: .horizontal)
+
         contentView.addSubview(panel)
         panel.addSubview(contentStack)
+        panel.addSubview(footerLinksStack)
         panel.addSubview(doneButton)
 
         NSLayoutConstraint.activate([
@@ -324,7 +337,17 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
             tableCard.leadingAnchor.constraint(equalTo: contentStack.leadingAnchor),
             tableCard.trailingAnchor.constraint(equalTo: contentStack.trailingAnchor),
 
-            doneButton.trailingAnchor.constraint(equalTo: contentStack.trailingAnchor),
+            footerLinksStack.leadingAnchor.constraint(
+                equalTo: contentStack.leadingAnchor,
+                constant: Layout.cardContentInset
+            ),
+            footerLinksStack.centerYAnchor.constraint(equalTo: doneButton.centerYAnchor),
+            footerLinksStack.trailingAnchor.constraint(lessThanOrEqualTo: doneButton.leadingAnchor, constant: -12),
+
+            doneButton.trailingAnchor.constraint(
+                equalTo: contentStack.trailingAnchor,
+                constant: -Layout.cardContentInset
+            ),
             doneButton.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -12)
         ])
 
@@ -641,8 +664,8 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
 
         NSLayoutConstraint.activate([
             content.topAnchor.constraint(equalTo: card.topAnchor, constant: 14),
-            content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16),
-            content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16),
+            content.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: Layout.cardContentInset),
+            content.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -Layout.cardContentInset),
             content.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -14)
         ])
 
@@ -662,7 +685,10 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
     }
 
     private func reloadFromStore() {
-        let snapshot = CustomVocabularyManager.shared.snapshot()
+        applySnapshot(CustomVocabularyManager.shared.snapshot())
+    }
+
+    private func applySnapshot(_ snapshot: CustomVocabularySnapshot) {
         rows = VocabularyListBuilder.rows(from: snapshot)
         tableSummaryLabel.stringValue = tableSummaryText(for: snapshot)
         vocabularyTableView.reloadData()
@@ -737,13 +763,112 @@ final class VocabularyWindowController: NSWindowController, NSWindowDelegate, NS
     }
 
     private func presentAlert(messageText: String, informativeText: String) {
+        presentAlert(messageText: messageText, informativeText: informativeText, style: .warning)
+    }
+
+    private func presentAlert(messageText: String, informativeText: String, style: NSAlert.Style) {
         let alert = NSAlert()
         alert.messageText = messageText
         alert.informativeText = informativeText
-        alert.alertStyle = .warning
+        alert.alertStyle = style
         alert.addButton(withTitle: "OK")
         guard let window else { return }
         alert.beginSheetModal(for: window)
+    }
+
+    private func makeFooterLinkButton(title: String, action: Selector) -> NSButton {
+        let button = NSButton(title: title, target: self, action: action)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.isBordered = false
+        button.bezelStyle = .inline
+        button.font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        button.contentTintColor = .linkColor
+        button.setButtonType(.momentaryPushIn)
+        let titleAttributes: [NSAttributedString.Key: Any] = [
+            .foregroundColor: NSColor.linkColor,
+            .underlineStyle: NSUnderlineStyle.single.rawValue,
+            .font: NSFont.systemFont(ofSize: 12, weight: .medium)
+        ]
+        button.attributedTitle = NSAttributedString(string: title, attributes: titleAttributes)
+        return button
+    }
+
+    @objc private func importVocabulary() {
+        guard let window else { return }
+
+        let openPanel = NSOpenPanel()
+        openPanel.title = "Import Vocabulary"
+        openPanel.message = "Choose a VoiceClutch vocabulary JSON file."
+        openPanel.canChooseFiles = true
+        openPanel.canChooseDirectories = false
+        openPanel.allowsMultipleSelection = false
+        openPanel.resolvesAliases = true
+        if #available(macOS 11.0, *) {
+            openPanel.allowedContentTypes = [.json]
+        } else {
+            openPanel.allowedFileTypes = ["json"]
+        }
+
+        openPanel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let self, let selectedURL = openPanel.url else { return }
+            self.performImport(from: selectedURL)
+        }
+    }
+
+    @objc private func exportVocabulary() {
+        guard let window else { return }
+
+        let savePanel = NSSavePanel()
+        savePanel.title = "Export Vocabulary"
+        savePanel.message = "Save your VoiceClutch vocabulary as a JSON file."
+        savePanel.nameFieldStringValue = "voiceclutch-vocabulary.json"
+        savePanel.canCreateDirectories = true
+        savePanel.isExtensionHidden = false
+        if #available(macOS 11.0, *) {
+            savePanel.allowedContentTypes = [.json]
+        } else {
+            savePanel.allowedFileTypes = ["json"]
+        }
+
+        savePanel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let self, let destinationURL = savePanel.url else { return }
+            self.performExport(to: destinationURL)
+        }
+    }
+
+    private func performImport(from fileURL: URL) {
+        do {
+            let data = try Data(contentsOf: fileURL)
+            let snapshot = try CustomVocabularyManager.shared.importPortableVocabulary(data)
+            applySnapshot(snapshot)
+            presentAlert(
+                messageText: "Vocabulary imported",
+                informativeText: "Loaded \(snapshot.manualEntries.count) manual, \(snapshot.shortcutEntries.count) shortcut, and \(snapshot.learnedRules.count) learned entries.",
+                style: .informational
+            )
+        } catch {
+            presentAlert(
+                messageText: "Couldn't import vocabulary",
+                informativeText: "Check the file and try again.\n\n\(error.localizedDescription)"
+            )
+        }
+    }
+
+    private func performExport(to fileURL: URL) {
+        do {
+            let data = try CustomVocabularyManager.shared.exportPortableVocabulary()
+            try data.write(to: fileURL, options: .atomic)
+            presentAlert(
+                messageText: "Vocabulary exported",
+                informativeText: "Saved to:\n\(fileURL.path)",
+                style: .informational
+            )
+        } catch {
+            presentAlert(
+                messageText: "Couldn't export vocabulary",
+                informativeText: "Try a different location and try again.\n\n\(error.localizedDescription)"
+            )
+        }
     }
 
     func numberOfRows(in tableView: NSTableView) -> Int {

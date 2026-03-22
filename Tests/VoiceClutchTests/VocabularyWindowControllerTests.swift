@@ -65,7 +65,6 @@ final class VocabularyListBuilderTests: XCTestCase {
                     id: learnedID,
                     source: "open ai",
                     target: "OpenAI",
-                    count: 1,
                     createdAt: newerTime,
                     updatedAt: newerTime
                 )

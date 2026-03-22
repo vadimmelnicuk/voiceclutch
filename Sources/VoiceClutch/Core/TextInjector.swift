@@ -19,7 +19,7 @@ public class TextInjector {
         "have", "has", "had",
         "may", "might", "shall",
     ]
-    nonisolated static let syntheticEventTag: Int64 = 0x56434C54 // "VCLT"
+    nonisolated static let syntheticEventTag: Int64 = SyntheticInputEvent.syntheticEventTag
 
     private struct StreamingSessionState {
         var isActive: Bool = false
@@ -31,61 +31,6 @@ public class TextInjector {
     }
 
     private static var streamingState = StreamingSessionState()
-
-    private struct ClipboardSnapshot {
-        let items: [Item]
-
-        static func capture(from pasteboard: NSPasteboard) -> ClipboardSnapshot? {
-            guard
-                let pasteboardItems = pasteboard.pasteboardItems,
-                !pasteboardItems.isEmpty
-            else {
-                return nil
-            }
-
-            let items = pasteboardItems.compactMap(Item.init)
-            guard !items.isEmpty else { return nil }
-
-            return ClipboardSnapshot(items: items)
-        }
-
-        func restore(to pasteboard: NSPasteboard) {
-            let restoredItems = items.map { $0.makePasteboardItem() }
-            guard !restoredItems.isEmpty else { return }
-
-            pasteboard.clearContents()
-            pasteboard.writeObjects(restoredItems)
-        }
-
-        struct Item {
-            let entries: [Entry]
-
-            init?(pasteboardItem: NSPasteboardItem) {
-                let entries = pasteboardItem.types.compactMap { type -> Entry? in
-                    guard let data = pasteboardItem.data(forType: type) else { return nil }
-                    return Entry(type: type, data: data)
-                }
-
-                guard !entries.isEmpty else { return nil }
-                self.entries = entries
-            }
-
-            func makePasteboardItem() -> NSPasteboardItem {
-                let item = NSPasteboardItem()
-
-                for entry in entries {
-                    item.setData(entry.data, forType: entry.type)
-                }
-
-                return item
-            }
-        }
-
-        struct Entry {
-            let type: NSPasteboard.PasteboardType
-            let data: Data
-        }
-    }
 
     // MARK: - One-shot injection (legacy)
 
@@ -149,6 +94,31 @@ public class TextInjector {
     }
 
     static func updateStreamingPartialNormalized(_ normalizedText: String) {
+        updateStreamingPartialNormalized(normalizedText, bypassRewriteThrottle: false)
+    }
+
+    static func updateStreamingProvisionalFinalNormalized(_ normalizedTranscript: String) {
+        let previewText = provisionalFinalPreviewText(fromNormalizedTranscript: normalizedTranscript)
+        guard !previewText.isEmpty else { return }
+        updateStreamingPartialNormalized(previewText, bypassRewriteThrottle: true)
+    }
+
+    static func provisionalFinalPreviewText(fromNormalizedTranscript cleaned: String) -> String {
+        terminalResolvedText(fromNormalizedTranscript: cleaned, appendTrailingSpace: false)
+    }
+
+    static func canApplyLiveRewriteNow(
+        now: TimeInterval,
+        lastRewriteDisplayTime: TimeInterval,
+        bypassRewriteThrottle: Bool
+    ) -> Bool {
+        bypassRewriteThrottle || now - lastRewriteDisplayTime >= rewriteDisplayInterval
+    }
+
+    private static func updateStreamingPartialNormalized(
+        _ normalizedText: String,
+        bypassRewriteThrottle: Bool
+    ) {
         guard !normalizedText.isEmpty else { return }
 
         let previousInjectedText: String
@@ -196,7 +166,11 @@ public class TextInjector {
             return
         }
 
-        guard now - lastRewriteDisplayTime >= rewriteDisplayInterval else {
+        guard canApplyLiveRewriteNow(
+            now: now,
+            lastRewriteDisplayTime: lastRewriteDisplayTime,
+            bypassRewriteThrottle: bypassRewriteThrottle
+        ) else {
             return
         }
 
@@ -317,14 +291,24 @@ public class TextInjector {
     }
 
     private static func finalizedStreamingText(fromNormalizedTranscript cleaned: String) -> String {
+        terminalResolvedText(fromNormalizedTranscript: cleaned, appendTrailingSpace: true)
+    }
+
+    private static func terminalResolvedText(
+        fromNormalizedTranscript cleaned: String,
+        appendTrailingSpace: Bool
+    ) -> String {
         guard !cleaned.isEmpty else { return "" }
 
+        let terminalResolved: String
         if hasTerminalPunctuation(cleaned) {
-            return "\(cleaned) "
+            terminalResolved = cleaned
+        } else {
+            let terminal = shouldEndAsQuestion(cleaned) ? "?" : "."
+            terminalResolved = "\(cleaned)\(terminal)"
         }
 
-        let terminal = shouldEndAsQuestion(cleaned) ? "?" : "."
-        return "\(cleaned)\(terminal) "
+        return appendTrailingSpace ? "\(terminalResolved) " : terminalResolved
     }
 
     public static func normalizedStreamingTranscript(_ text: String) -> String {
@@ -696,75 +680,15 @@ public class TextInjector {
 
     /// Simulate Cmd+V keyboard shortcut.
     private static func simulatePaste() {
-        let source = CGEventSource(stateID: .combinedSessionState)
-        let cmdFlag = CGEventFlags.maskCommand.rawValue
-
-        // Cmd key down
-        if let cmdDown = CGEvent(
-            keyboardEventSource: source,
-            virtualKey: 55, // kVK_Command
-            keyDown: true
-        ) {
-            postSyntheticEvent(cmdDown, flags: CGEventFlags(rawValue: cmdFlag))
-        }
-
-        // V key down (with Cmd modifier)
-        if let vDown = CGEvent(
-            keyboardEventSource: source,
-            virtualKey: 9, // kVK_ANSI_V
-            keyDown: true
-        ) {
-            postSyntheticEvent(vDown, flags: CGEventFlags(rawValue: cmdFlag))
-        }
-
-        // V key up
-        if let vUp = CGEvent(
-            keyboardEventSource: source,
-            virtualKey: 9,
-            keyDown: false
-        ) {
-            postSyntheticEvent(vUp, flags: CGEventFlags(rawValue: cmdFlag))
-        }
-
-        // Cmd key up
-        if let cmdUp = CGEvent(
-            keyboardEventSource: source,
-            virtualKey: 55,
-            keyDown: false
-        ) {
-            postSyntheticEvent(cmdUp, flags: CGEventFlags(rawValue: cmdFlag))
-        }
+        SyntheticInputEvent.postCommandShortcut(keyCode: 9) // kVK_ANSI_V
     }
 
     /// Deletes the previously inserted partial by issuing Backspace events.
     private static func deleteRecentlyInsertedText(characterCount: Int) {
         guard characterCount > 0 else { return }
 
-        let source = CGEventSource(stateID: .combinedSessionState)
-        let deleteKeyCode: CGKeyCode = 51 // kVK_Delete
-
         for _ in 0..<characterCount {
-            if let keyDown = CGEvent(
-                keyboardEventSource: source,
-                virtualKey: deleteKeyCode,
-                keyDown: true
-            ) {
-                postSyntheticEvent(keyDown, flags: [])
-            }
-
-            if let keyUp = CGEvent(
-                keyboardEventSource: source,
-                virtualKey: deleteKeyCode,
-                keyDown: false
-            ) {
-                postSyntheticEvent(keyUp, flags: [])
-            }
+            SyntheticInputEvent.postKeyStroke(keyCode: 51) // kVK_Delete
         }
-    }
-
-    private static func postSyntheticEvent(_ event: CGEvent, flags: CGEventFlags) {
-        event.flags = flags
-        event.setIntegerValueField(.eventSourceUserData, value: syntheticEventTag)
-        event.post(tap: .cghidEventTap)
     }
 }
