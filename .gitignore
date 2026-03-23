@@ -15,6 +15,7 @@ DerivedData/
 # Build artifacts
 *.app
 *.dmg
+*.pkg
 default.profraw
 default.profdata
 

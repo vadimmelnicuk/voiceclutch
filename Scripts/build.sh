@@ -1,6 +1,6 @@
 #!/bin/bash
 # Build script for VoiceClutch macOS app
-# Usage: ./build.sh [--production|-p] [--sign-identity "<Developer ID Application: Team (TEAMID)>"] [--notary-profile "<profile>"]
+# Usage: ./build.sh [--production|-p] [--skip-certification] [--sign-identity "<Developer ID Application: Team (TEAMID)>"] [--notary-profile "<profile>"]
 
 set -e
 
@@ -15,6 +15,7 @@ fi
 # Parse arguments
 CONFIGURATION="Debug"
 BUILD_FOR_PRODUCTION=false
+SKIP_PRODUCTION_CERTIFICATION=false
 SIGN_IDENTITY="${VOICECLUTCH_SIGN_IDENTITY:-}"
 NOTARY_PROFILE="${VOICECLUTCH_NOTARY_PROFILE:-}"
 NOTARY_APPLE_ID="${VOICECLUTCH_APPLE_ID:-}"
@@ -26,6 +27,10 @@ while [[ $# -gt 0 ]]; do
         --production|-p)
             CONFIGURATION="Release"
             BUILD_FOR_PRODUCTION=true
+            shift
+            ;;
+        --skip-certification)
+            SKIP_PRODUCTION_CERTIFICATION=true
             shift
             ;;
         --sign-identity)
@@ -53,10 +58,11 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         --help|-h)
-            echo "Usage: $0 [--production|-p] [--sign-identity \"<Developer ID Application: Team (TEAMID)>\"] [--notary-profile \"<profile>\"]"
+            echo "Usage: $0 [--production|-p] [--skip-certification] [--sign-identity \"<Developer ID Application: Team (TEAMID)>\"] [--notary-profile \"<profile>\"]"
             echo ""
             echo "Options:"
             echo "  --production, -p    Build for production (Release configuration, no auto-launch)"
+            echo "  --skip-certification Skip Developer ID signing/notarization for production builds"
             echo "  --sign-identity     Developer ID Application identity for codesign"
             echo "  --notary-profile    notarytool keychain profile name (recommended)"
             echo "  --help, -h          Show this help message"
@@ -70,6 +76,7 @@ while [[ $# -gt 0 ]]; do
             echo ""
             echo "Notes:"
             echo "  If present, ./.env is loaded automatically before parsing arguments."
+            echo "  --skip-certification can be used with --production for external signing workflows."
             exit 0
             ;;
         *)
@@ -79,6 +86,11 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+if [ "$SKIP_PRODUCTION_CERTIFICATION" = true ] && [ "$BUILD_FOR_PRODUCTION" != true ]; then
+    echo "Error: --skip-certification can only be used with --production." >&2
+    exit 1
+fi
 
 APP_NAME="VoiceClutch"
 PRODUCTION_BUNDLE_IDENTIFIER=$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "Resources/Info.plist" 2>/dev/null || true)
@@ -171,6 +183,10 @@ codesign_with_hints() {
 
 validate_production_certification_requirements() {
     if [ "$BUILD_FOR_PRODUCTION" != true ]; then
+        return
+    fi
+
+    if [ "$SKIP_PRODUCTION_CERTIFICATION" = true ]; then
         return
     fi
 
@@ -659,10 +675,17 @@ echo ""
 echo "App bundle location: ${APP_BUNDLE}"
 
 if [ "$BUILD_FOR_PRODUCTION" = true ]; then
-    certify_production_app_bundle "${APP_BUNDLE}"
-    echo ""
-    echo "📦 Production bundle created."
-    echo "   The app is ready for Developer ID distribution."
+    if [ "$SKIP_PRODUCTION_CERTIFICATION" = true ]; then
+        echo "⏭️  Skipping production certification (--skip-certification)."
+        echo ""
+        echo "📦 Production bundle created."
+        echo "   App bundle is ready for external signing/packaging workflows."
+    else
+        certify_production_app_bundle "${APP_BUNDLE}"
+        echo ""
+        echo "📦 Production bundle created."
+        echo "   The app is ready for Developer ID distribution."
+    fi
 else
     echo "🔏 Applying stable ad-hoc signature for debug app identity..."
     codesign --force --deep --sign - --identifier "$DEBUG_BUNDLE_IDENTIFIER" "${APP_BUNDLE}"

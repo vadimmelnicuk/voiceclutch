@@ -1,6 +1,6 @@
 #!/bin/bash
 # Bundle a built VoiceClutch app into a distributable DMG.
-# Usage: ./bundle.sh [--app <path>] [--output <path>] [--volume-name <name>] [--background <path>] [--plain]
+# Usage: ./bundle-dmg.sh [--app <path>] [--output <path>] [--volume-name <name>] [--background <path>] [--plain]
 
 set -euo pipefail
 
@@ -19,7 +19,7 @@ VERIFY_MOUNT_POINT=""
 
 usage() {
     cat <<'USAGE'
-Usage: ./bundle.sh [options]
+Usage: ./bundle-dmg.sh [options]
 
 Bundle a built .app into a compressed DMG with an Applications shortcut.
 This script uses only native macOS tooling (hdiutil + Finder AppleScript).
