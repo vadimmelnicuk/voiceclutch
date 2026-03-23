@@ -18,10 +18,10 @@ Private, on-device voice dictation for macOS with low-latency streaming transcri
 
 ### Productivity Helpers
 
-- **Media pause/resume** - Optionally pauses active macOS media playback while dictating and resumes after.
-- **Clipboard recovery** - Restores your previous clipboard contents after dictation injection.
-- **Microphone chimes** - Optional start/stop sounds for listening state feedback.
 - **Vocabulary manager** - Add manual replacements, review learned corrections, and import/export vocabulary JSON.
+- **Clipboard recovery** - Restores your previous clipboard contents after dictation injection.
+- **Media pause/resume** - Optionally pauses active macOS media playback while dictating and resumes after.
+- **Microphone chimes** - Optional start/stop sounds for listening state feedback.
 
 ### Local Intelligence & Privacy
 
@@ -32,21 +32,23 @@ Private, on-device voice dictation for macOS with low-latency streaming transcri
 
 ## Getting Started
 
-1. Use the menu bar icon to confirm VoiceClutch is ready.
-2. Press and hold the default shortcut `Left Control` to dictate in hold-to-talk mode.
-3. Release to finish dictation and inject text into the active field.
-4. Open `Preferences` from the menu bar to change shortcut, interaction mode, and optional features.
+1. Download the latest release, then move `VoiceClutch.app` to `Applications`.
+2. Launch VoiceClutch and confirm the menu bar icon appears.
+3. Grant requested permissions (microphone and accessibility) when prompted.
+4. Place your cursor in any text field.
+5. Press and hold `Left Control` to dictate.
+6. Open `Preferences` to customize shortcut, interaction mode, and optional features.
 
 ## Acknowledgements
 
-- [FluidInference Nvidia Nemotron Speech Streaming 0.6b CoreML](https://huggingface.co/FluidInference/nemotron-speech-streaming-en-0.6b-coreml) - An on-device streaming ASR model used by VoiceClutch for low-latency speech-to-text dictation.
-- [LFM2.5-1.2B-Instruct-MLX-4bit](https://huggingface.co/lmstudio-community/LFM2.5-1.2B-Instruct-MLX-4bit) - A compact MLX instruction model used by VoiceClutch for local transcript cleanup and optional smart-formatting passes.
-- [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm) - Swift tooling for loading and running MLX language models. VoiceClutch relies on it to execute local LLM inference.
-- [Apple Frameworks](https://developer.apple.com/documentation) - CoreAudio handles audio I/O, AVFoundation coordinates media capture, CoreML runs model inference, CoreGraphics supports rendering primitives, and AppKit powers the native macOS interface.
+- [FluidInference Nvidia Nemotron Speech Streaming 0.6b CoreML](https://huggingface.co/FluidInference/nemotron-speech-streaming-en-0.6b-coreml) - On-device low-latency streaming speech-to-text.
+- [LFM2.5-1.2B-Instruct-MLX-4bit](https://huggingface.co/lmstudio-community/LFM2.5-1.2B-Instruct-MLX-4bit) - Compact local model for cleanup.
+- [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm) - Swift MLX language-model runtime.
+- [Apple Frameworks](https://developer.apple.com/documentation) - Native frameworks for app core.
 
 ## Feedback & Contributions
 
-For issues, suggestions, or feature requests, please [open an issue](../../issues).
+For issues, suggestions, or feature requests, please [open a ticket](https://github.com/vadimmelnicuk/voiceclutch/issues).
 
 ## License
 
