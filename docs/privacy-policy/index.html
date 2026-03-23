@@ -4,59 +4,114 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VoiceClutch Privacy Policy</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
   <style>
     :root {
-      color-scheme: light dark;
-      --bg: #ffffff;
-      --fg: #1f2328;
-      --muted: #59636e;
-      --card: #f6f8fa;
-      --link: #0969da;
-      --border: #d0d7de;
+      --bg-color: #040812;
     }
-    @media (prefers-color-scheme: dark) {
-      :root {
-        --bg: #0d1117;
-        --fg: #e6edf3;
-        --muted: #9da7b2;
-        --card: #161b22;
-        --link: #58a6ff;
-        --border: #30363d;
-      }
-    }
-    body {
+    body, html {
       margin: 0;
-      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
-      background: var(--bg);
-      color: var(--fg);
-      line-height: 1.5;
+      padding: 0;
+      min-height: 100vh;
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      background-color: var(--bg-color);
+      color: #ffffff;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+    /* Subtle monochrome background glow */
+    .glow-container {
+        position: fixed; inset: 0; overflow: hidden; z-index: -2; pointer-events: none; 
+    }
+    .glow {
+        position: absolute; inset: 0;
+        width: 100vw; height: 100vh;
+        background: 
+            radial-gradient(circle at 90% 110%, rgba(229, 168, 139, 0.45) 0%, rgba(186, 125, 110, 0.28) 35%, rgba(110, 65, 70, 0.15) 65%, rgba(60, 40, 50, 0.05) 85%, transparent 100%),
+            radial-gradient(circle at 10% -10%, rgba(30, 50, 80, 0.45) 0%, rgba(20, 35, 60, 0.25) 50%, rgba(10, 20, 35, 0.1) 80%, transparent 100%);
+        filter: blur(30px);
+        transform: scale(1.1);
+    }
+    /* Monochrome cinematic grain overlay */
+    .grain-layer {
+        position: fixed; inset: 0; z-index: -1; pointer-events: none;
+        background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='2.25' numOctaves='8' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+        opacity: 0.8;
+        mix-blend-mode: overlay;
     }
     main {
       max-width: 840px;
       margin: 0 auto;
-      padding: 32px 20px 64px;
+      padding: 64px 20px;
+      position: relative;
+      z-index: 10;
     }
     h1, h2 {
       line-height: 1.25;
+      font-weight: 600;
+      color: #ffffff;
+    }
+    h1 {
+      font-size: 2.5rem;
+      font-weight: 800;
+      margin-bottom: 0.5rem;
+      background: linear-gradient(135deg, #fff3dd 0%, #6c6c80 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+    h2 {
+      margin-top: 2.5rem;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+      padding-bottom: 0.5rem;
     }
     .meta {
-      color: var(--muted);
-      margin-top: -10px;
-      margin-bottom: 24px;
+      color: rgba(255,255,255,0.5);
+      margin-top: 0;
+      margin-bottom: 32px;
+      font-size: 0.9rem;
     }
     a {
-      color: var(--link);
+      color: #ffffff;
+      text-decoration: underline;
+      text-decoration-color: rgba(255,255,255,0.3);
+      text-underline-offset: 4px;
+      transition: text-decoration-color 0.2s;
+    }
+    a:hover {
+      text-decoration-color: #ffffff;
     }
     code {
-      background: var(--card);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 1px 5px;
-      font-size: 0.92em;
+      background: rgba(255,255,255,0.1);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 0.9em;
+      border: 1px solid rgba(255,255,255,0.1);
+    }
+    ul {
+      padding-left: 20px;
+    }
+    li {
+      margin-bottom: 8px;
+      color: rgba(255,255,255,0.85);
+    }
+    p {
+      color: rgba(255,255,255,0.85);
+      line-height: 1.6;
     }
   </style>
 </head>
 <body>
+  <!-- Subtle center glow -->
+  <div class="glow-container">
+      <div class="glow"></div>
+  </div>
+  
+  <!-- Monochrome grain -->
+  <div class="grain-layer"></div>
+
   <main>
     <h1>VoiceClutch Privacy Policy</h1>
     <p class="meta">Last updated: March 23, 2026</p>
