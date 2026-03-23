@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VoiceClutch Privacy Policy</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #ffffff;
+      --fg: #1f2328;
+      --muted: #59636e;
+      --card: #f6f8fa;
+      --link: #0969da;
+      --border: #d0d7de;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1117;
+        --fg: #e6edf3;
+        --muted: #9da7b2;
+        --card: #161b22;
+        --link: #58a6ff;
+        --border: #30363d;
+      }
+    }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+      line-height: 1.5;
+    }
+    main {
+      max-width: 840px;
+      margin: 0 auto;
+      padding: 32px 20px 64px;
+    }
+    h1, h2 {
+      line-height: 1.25;
+    }
+    .meta {
+      color: var(--muted);
+      margin-top: -10px;
+      margin-bottom: 24px;
+    }
+    a {
+      color: var(--link);
+    }
+    code {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 1px 5px;
+      font-size: 0.92em;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>VoiceClutch Privacy Policy</h1>
+    <p class="meta">Last updated: March 23, 2026</p>
+
+    <p>
+      VoiceClutch is designed to be privacy-first. This policy explains what data the app processes, where processing happens, and what controls you have.
+    </p>
+    <p>
+      VoiceClutch does not require account creation and does not operate a backend service for dictation content.
+    </p>
+
+    <h2>1. Data Processing Overview</h2>
+    <ul>
+      <li>Speech recognition and transcript cleanup run locally on your device.</li>
+      <li>VoiceClutch does not send your microphone audio or transcript content to VoiceClutch servers.</li>
+      <li>VoiceClutch does not run analytics or usage telemetry.</li>
+    </ul>
+
+    <h2>2. Permissions Used</h2>
+    <ul>
+      <li><strong>Microphone</strong>: required to capture audio for dictation.</li>
+      <li><strong>Accessibility</strong>: required to insert dictated text into other apps.</li>
+    </ul>
+    <p>
+      You can revoke permissions at any time in macOS System Settings.
+    </p>
+
+    <h2>3. Network Access</h2>
+    <p>
+      VoiceClutch may access the network to download on-device model files needed for local inference (for example, from model hosting providers such as Hugging Face). These downloads use standard secure transport provided by Apple platforms.
+      To deliver these files, hosting providers may process technical request metadata such as IP address, user agent, and request timestamps under their own privacy policies.
+    </p>
+
+    <h2>4. Data Stored Locally</h2>
+    <p>VoiceClutch stores data locally on your Mac, such as:</p>
+    <ul>
+      <li>App settings and preferences</li>
+      <li>Downloaded model files used for local inference</li>
+      <li>Optional local vocabulary/customization data</li>
+    </ul>
+    <p>
+      Typical storage location includes <code>~/Library/Application Support/voiceclutch</code>.
+    </p>
+
+    <h2>5. Data Sharing</h2>
+    <p>
+      VoiceClutch does not sell personal data and does not share dictation content with third parties for advertising.
+      VoiceClutch may transfer technical request metadata to model hosting providers only as needed to download model files.
+      VoiceClutch does not include third-party analytics or advertising SDKs.
+    </p>
+
+    <h2 id="choices">6. Your Privacy Choices</h2>
+    <p>This section explains controls available to you for privacy and local data in VoiceClutch.</p>
+    <ul>
+      <li>Turn off Microphone and Accessibility permissions in macOS System Settings at any time.</li>
+      <li>Delete local app data, including downloaded models, from <code>~/Library/Application Support/voiceclutch</code>.</li>
+      <li>Uninstall the app to stop all processing.</li>
+      <li>Manage optional behavior such as microphone chimes and local vocabulary features in app settings.</li>
+    </ul>
+    <p>
+      Since VoiceClutch has no account system, there is no in-app account deletion flow. Removing local app data and uninstalling the app are the primary deletion controls.
+    </p>
+
+    <h2>7. Children</h2>
+    <p>
+      VoiceClutch is not specifically directed to children under 13.
+    </p>
+
+    <h2>8. Data Retention</h2>
+    <p>
+      VoiceClutch stores app data locally on your device until you remove it or uninstall the app.
+      VoiceClutch does not retain dictation content on VoiceClutch-operated servers.
+    </p>
+    <p>
+      Third-party model hosting providers may retain download request logs according to their own policies and legal obligations.
+    </p>
+
+    <h2>9. Policy Changes</h2>
+    <p>
+      We may update this policy when app behavior changes. Updates will be posted at this URL with a revised date.
+    </p>
+
+    <h2>10. Contact</h2>
+    <p>
+      For privacy questions, open a ticket at
+      <a href="https://github.com/vadimmelnicuk/voiceclutch/issues">github.com/vadimmelnicuk/voiceclutch/issues</a>.
+    </p>
+  </main>
+</body>
+</html>

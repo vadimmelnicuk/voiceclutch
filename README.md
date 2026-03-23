@@ -41,8 +41,8 @@ Private, on-device voice dictation for macOS with low-latency streaming transcri
 
 ## Acknowledgements
 
-- [FluidInference Nvidia Nemotron Speech Streaming 0.6b CoreML](https://huggingface.co/FluidInference/nemotron-speech-streaming-en-0.6b-coreml) - On-device low-latency streaming speech-to-text.
-- [LFM2.5-1.2B-Instruct-MLX-4bit](https://huggingface.co/lmstudio-community/LFM2.5-1.2B-Instruct-MLX-4bit) - Compact local model for cleanup.
+- [NVIDIA Nemotron Speech Streaming 0.6b CoreML by FluidInference](https://huggingface.co/FluidInference/nemotron-speech-streaming-en-0.6b-coreml) - On-device low-latency streaming speech-to-text model.
+- [LFM2.5-1.2B-Instruct-MLX-4bit](https://huggingface.co/lmstudio-community/LFM2.5-1.2B-Instruct-MLX-4bit) - Compact local large-langauge model for cleanup.
 - [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-lm) - Swift MLX language-model runtime.
 - [Apple Frameworks](https://developer.apple.com/documentation) - Native frameworks for app core.
 

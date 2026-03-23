@@ -661,7 +661,14 @@ public class TextInjector {
         deletedCharacterCount: Int,
         didQueuePaste: Bool
     ) -> TimeInterval {
-        guard didQueuePaste, deletedCharacterCount > 0 else { return 0 }
+        guard didQueuePaste else { return 0 }
+
+        // Give Cmd+V a minimum dispatch window before restoration so queued
+        // recoveries do not race ahead of the paste event under load.
+        let basePasteDispatchDelay: TimeInterval = 0.18
+        guard deletedCharacterCount > 0 else {
+            return basePasteDispatchDelay
+        }
 
         // Backspace is posted as key-down/key-up pairs, then Cmd+V is posted.
         // Large queued rewrites can delay paste dispatch; budget extra restore
@@ -669,7 +676,7 @@ public class TextInjector {
         let estimatedEventCount = (deletedCharacterCount * 2) + 4
         let perEventBudget: TimeInterval = 0.0015
         let delay = Double(estimatedEventCount) * perEventBudget
-        return min(3.0, delay)
+        return min(3.0, basePasteDispatchDelay + delay)
     }
 
     private static func isStreamingSessionActive() -> Bool {

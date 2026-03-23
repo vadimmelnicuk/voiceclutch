@@ -129,6 +129,32 @@ require_command() {
     fi
 }
 
+generate_icns_icon() {
+    local source_png="$1"
+    local output_icns="$2"
+    local iconset_dir="$3"
+    local size
+    local retina_size
+
+    if ! command -v sips >/dev/null 2>&1; then
+        return 1
+    fi
+    if ! command -v iconutil >/dev/null 2>&1; then
+        return 1
+    fi
+
+    rm -rf "$iconset_dir"
+    mkdir -p "$iconset_dir"
+
+    for size in 16 32 128 256 512; do
+        retina_size=$((size * 2))
+        sips -z "$size" "$size" "$source_png" --out "${iconset_dir}/icon_${size}x${size}.png" >/dev/null
+        sips -z "$retina_size" "$retina_size" "$source_png" --out "${iconset_dir}/icon_${size}x${size}@2x.png" >/dev/null
+    done
+
+    iconutil -c icns "$iconset_dir" -o "$output_icns"
+}
+
 set_plist_string_value() {
     local plist_path="$1"
     local key="$2"
@@ -631,11 +657,27 @@ else
     echo "⚠️  Warning: GitHub icon asset not found (Resources/${GITHUB_ICON_FILE})"
 fi
 
-# Copy app icon
-if [ -f "Resources/VoiceClutch.png" ]; then
-    cp "Resources/VoiceClutch.png" "${APP_BUNDLE}/Contents/Resources/VoiceClutch.png"
+# Copy app icon assets (PNG + generated ICNS for App Store validation).
+APP_ICON_SOURCE="Resources/VoiceClutch.png"
+APP_ICON_PNG_DEST="${APP_BUNDLE}/Contents/Resources/VoiceClutch.png"
+APP_ICON_ICNS_DEST="${APP_BUNDLE}/Contents/Resources/VoiceClutch.icns"
+APP_ICONSET_DIR=".build/iconset/VoiceClutch.iconset"
+
+if [ -f "$APP_ICON_SOURCE" ]; then
+    cp "$APP_ICON_SOURCE" "$APP_ICON_PNG_DEST"
+    if generate_icns_icon "$APP_ICON_SOURCE" "$APP_ICON_ICNS_DEST" "$APP_ICONSET_DIR"; then
+        echo "📦 Generated app icon ICNS: ${APP_ICON_ICNS_DEST}"
+    else
+        if [ "$BUILD_FOR_PRODUCTION" = true ]; then
+            fail "Failed to generate required macOS ICNS app icon for production build."
+        fi
+        echo "⚠️  Warning: Failed to generate macOS ICNS app icon."
+    fi
 else
-    echo "⚠️  Warning: App icon source file not found (Resources/VoiceClutch.png)"
+    if [ "$BUILD_FOR_PRODUCTION" = true ]; then
+        fail "App icon source file not found: ${APP_ICON_SOURCE}"
+    fi
+    echo "⚠️  Warning: App icon source file not found (${APP_ICON_SOURCE})"
 fi
 
 # Copy chime assets used by MicrophoneChimePlayer.

@@ -61,6 +61,17 @@ require_command() {
     fi
 }
 
+strip_quarantine_attributes() {
+    local target="$1"
+
+    if ! command -v xattr >/dev/null 2>&1; then
+        echo "⚠️  Warning: xattr command not found; skipping quarantine cleanup."
+        return
+    fi
+
+    xattr -r -d com.apple.quarantine "$target" 2>/dev/null || true
+}
+
 codesign_with_hints() {
     local target="$1"
     shift
@@ -210,6 +221,7 @@ require_command pkgutil
 require_command spctl
 require_command swift
 require_command xcodebuild
+require_command xattr
 
 if [ -z "$PROVISIONING_PROFILE" ]; then
     fail "Missing provisioning profile. Pass --provisioning-profile or set VOICECLUTCH_MAS_PROVISIONING_PROFILE."
@@ -237,8 +249,13 @@ if [ ! -d "$APP_PATH" ]; then
     fail "Expected app bundle not found after build: ${APP_PATH}"
 fi
 
+# Ensure payload does not retain quarantine metadata before signing and packaging.
+echo "🧹 Clearing quarantine metadata from app bundle..."
+strip_quarantine_attributes "$APP_PATH"
+
 echo "📄 Embedding provisioning profile..."
 cp "$PROVISIONING_PROFILE" "${APP_PATH}/Contents/embedded.provisionprofile"
+strip_quarantine_attributes "${APP_PATH}/Contents/embedded.provisionprofile"
 
 echo "🔐 Signing app payload for Mac App Store..."
 sign_nested_code "$APP_PATH"
@@ -262,6 +279,9 @@ productbuild \
     --component "$APP_PATH" /Applications \
     --sign "$INSTALLER_SIGN_IDENTITY" \
     "$OUTPUT_PATH"
+
+# Remove quarantine from generated installer package if inherited from environment.
+strip_quarantine_attributes "$OUTPUT_PATH"
 
 echo "🧾 Verifying installer package signature..."
 pkgutil --check-signature "$OUTPUT_PATH"

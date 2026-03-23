@@ -6,6 +6,7 @@
     "build:production": "./Scripts/build.sh --production",
     "bundle:dmg": "./Scripts/bundle-dmg.sh",
     "bundle:pkg": "./Scripts/bundle-pkg.sh",
+    "upload": "./Scripts/upload.sh",
     "test": "./Scripts/test.sh"
   }
 }

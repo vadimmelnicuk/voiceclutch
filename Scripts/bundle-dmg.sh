@@ -5,7 +5,8 @@
 set -euo pipefail
 
 APP_PATH="VoiceClutch.app"
-OUTPUT_PATH="VoiceClutch.dmg"
+OUTPUT_PATH=""
+OUTPUT_PATH_SET=false
 VOLUME_NAME="VoiceClutch"
 STYLE_DMG=true
 BACKGROUND_PATH=""
@@ -26,7 +27,7 @@ This script uses only native macOS tooling (hdiutil + Finder AppleScript).
 
 Options:
   --app <path>          Path to .app bundle (default: VoiceClutch.app)
-  --output <path>       Output DMG path (default: VoiceClutch.dmg)
+  --output <path>       Output DMG path (default: <app-name>-<version>-<platform>.dmg)
   --volume-name <name>  Mounted DMG volume name (default: VoiceClutch)
   --background <path>   PNG/JPG background image for Finder window
   --plain               Skip Finder layout styling for headless/CI usage
@@ -109,10 +110,12 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             OUTPUT_PATH="$2"
+            OUTPUT_PATH_SET=true
             shift 2
             ;;
         --output=*)
             OUTPUT_PATH="${1#*=}"
+            OUTPUT_PATH_SET=true
             shift
             ;;
         --volume-name)
@@ -176,6 +179,30 @@ if [ "$STYLE_DMG" = true ] && ! command -v osascript >/dev/null 2>&1; then
     STYLE_DMG=false
 fi
 
+APP_BASENAME="$(basename "$APP_PATH")"
+APP_FILE_NAME="${APP_BASENAME%.app}"
+APP_INFO_PLIST_PATH="${APP_PATH}/Contents/Info.plist"
+APP_EXECUTABLE_PATH="${APP_PATH}/Contents/MacOS/${APP_FILE_NAME}"
+APP_PLATFORM="$(uname -m)"
+
+if [ "$OUTPUT_PATH_SET" = false ]; then
+    APP_VERSION="$(
+        /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP_INFO_PLIST_PATH" 2>/dev/null || true
+    )"
+    if [ -z "$APP_VERSION" ]; then
+        echo "Error: Could not determine CFBundleShortVersionString from ${APP_INFO_PLIST_PATH}" >&2
+        echo "Pass --output explicitly or ensure the app bundle has a short version string." >&2
+        exit 1
+    fi
+    if [ -f "$APP_EXECUTABLE_PATH" ] && command -v lipo >/dev/null 2>&1; then
+        APP_ARCHS="$(lipo -archs "$APP_EXECUTABLE_PATH" 2>/dev/null | xargs || true)"
+        if [ -n "$APP_ARCHS" ]; then
+            APP_PLATFORM="$(echo "$APP_ARCHS" | tr ' ' '-')"
+        fi
+    fi
+    OUTPUT_PATH="${APP_FILE_NAME}-${APP_VERSION}-${APP_PLATFORM}.dmg"
+fi
+
 mkdir -p "$(dirname "$OUTPUT_PATH")"
 rm -f "$OUTPUT_PATH"
 
@@ -187,7 +214,6 @@ if [ "$STYLE_DMG" = true ] && [ -n "$BACKGROUND_PATH" ]; then
     BACKGROUND_FILE_NAME="$(basename "$BACKGROUND_PATH")"
 fi
 
-APP_BASENAME="$(basename "$APP_PATH")"
 DMG_SIZE_MB="$(calculate_dmg_size_mb "$APP_PATH" "$BACKGROUND_PATH")"
 
 echo "📦 Creating temporary writable DMG (${DMG_SIZE_MB} MB)..."

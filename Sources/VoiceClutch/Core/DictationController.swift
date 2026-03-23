@@ -293,7 +293,14 @@ public final class DictationController: ObservableObject {
 
         guard !Task.isCancelled else { return }
         finalProcessingTask = nil
-        TextInjector.commitStreamingFinalNormalized(processedTranscript.finalTranscript)
+        let normalizedProcessedFinal = TextInjector.normalizedStreamingTranscript(
+            processedTranscript.finalTranscript
+        )
+        let stabilizedProcessedFinal = stabilizedTranscript(
+            normalizedProcessedFinal,
+            previous: transcript
+        )
+        TextInjector.commitStreamingFinalNormalized(stabilizedProcessedFinal)
         resetPartialState()
         state = .idle
     }
@@ -574,12 +581,17 @@ public final class DictationController: ObservableObject {
 
         let suffixStart = candidate.index(candidate.startIndex, offsetBy: previous.count)
         let suffix = String(candidate[suffixStart...])
-        guard let overlapLength = duplicatedJoinOverlapLength(previous: previous, suffix: suffix) else {
+        if let overlapLength = duplicatedJoinOverlapLength(previous: previous, suffix: suffix) {
+            let trimmedSuffixStart = suffix.index(suffix.startIndex, offsetBy: overlapLength)
+            let stabilized = previous + suffix[trimmedSuffixStart...]
+            return stabilized.count < candidate.count ? stabilized : candidate
+        }
+
+        guard let trimmedRestartSuffix = trimmedRestartedDuplicateSuffix(previous: previous, suffix: suffix) else {
             return candidate
         }
 
-        let trimmedSuffixStart = suffix.index(suffix.startIndex, offsetBy: overlapLength)
-        let stabilized = previous + suffix[trimmedSuffixStart...]
+        let stabilized = previous + trimmedRestartSuffix
         return stabilized.count < candidate.count ? stabilized : candidate
     }
 
@@ -611,6 +623,150 @@ public final class DictationController: ObservableObject {
         }
 
         return nil
+    }
+
+    private struct TranscriptTokenComponent {
+        let normalizedValue: String
+        let endIndex: String.Index
+    }
+
+    private func trimmedRestartedDuplicateSuffix(previous: String, suffix: String) -> String? {
+        guard let suffixContentStart = firstAlphaNumericIndex(in: suffix) else {
+            return nil
+        }
+
+        let previousComponents = normalizedTokenComponents(in: previous)
+        let suffixComponents = normalizedTokenComponents(in: suffix, startingAt: suffixContentStart)
+
+        guard previousComponents.count >= 8, suffixComponents.count >= 8 else {
+            return nil
+        }
+
+        let maxOverlap = min(previousComponents.count, suffixComponents.count)
+        var overlapCount = 0
+        while overlapCount < maxOverlap {
+            guard previousComponents[overlapCount].normalizedValue == suffixComponents[overlapCount].normalizedValue else {
+                break
+            }
+            overlapCount += 1
+        }
+
+        guard overlapCount >= 8 else {
+            return nil
+        }
+
+        let shorterSideCount = min(previousComponents.count, suffixComponents.count)
+        guard overlapCount * 100 >= shorterSideCount * 80 else {
+            return nil
+        }
+
+        let overlapEndIndex = suffixComponents[overlapCount - 1].endIndex
+        return String(suffix[overlapEndIndex...])
+    }
+
+    private func normalizedTokenComponents(
+        in text: String,
+        startingAt start: String.Index? = nil
+    ) -> [TranscriptTokenComponent] {
+        var components: [TranscriptTokenComponent] = []
+        var index = start ?? text.startIndex
+
+        while index < text.endIndex {
+            guard isAlphaNumeric(text[index]) else {
+                index = text.index(after: index)
+                continue
+            }
+
+            let tokenStart = index
+            while index < text.endIndex, isAlphaNumeric(text[index]) {
+                index = text.index(after: index)
+            }
+            let tokenEnd = index
+            let token = text[tokenStart..<tokenEnd]
+            let normalizedSubtokens = splitTokenIntoComparisonSubtokens(token)
+
+            if normalizedSubtokens.isEmpty {
+                continue
+            }
+
+            for normalizedSubtoken in normalizedSubtokens {
+                components.append(
+                    TranscriptTokenComponent(
+                        normalizedValue: normalizedSubtoken,
+                        endIndex: tokenEnd
+                    )
+                )
+            }
+        }
+
+        return components
+    }
+
+    private func splitTokenIntoComparisonSubtokens(_ token: Substring) -> [String] {
+        let tokenString = String(token)
+        guard !tokenString.isEmpty else {
+            return []
+        }
+
+        var subtokens: [String] = []
+        var subtokenStart = tokenString.startIndex
+        var index = tokenString.index(after: subtokenStart)
+
+        while index < tokenString.endIndex {
+            let previousIndex = tokenString.index(before: index)
+            let previousCharacter = tokenString[previousIndex]
+            let currentCharacter = tokenString[index]
+
+            if shouldSplitToken(previous: previousCharacter, current: currentCharacter) {
+                let nextSubtoken = tokenString[subtokenStart..<index].lowercased()
+                if !nextSubtoken.isEmpty {
+                    subtokens.append(nextSubtoken)
+                }
+                subtokenStart = index
+            }
+
+            index = tokenString.index(after: index)
+        }
+
+        let trailingSubtoken = tokenString[subtokenStart..<tokenString.endIndex].lowercased()
+        if !trailingSubtoken.isEmpty {
+            subtokens.append(trailingSubtoken)
+        }
+
+        return subtokens
+    }
+
+    private func shouldSplitToken(previous: Character, current: Character) -> Bool {
+        let previousIsNumeric = isNumeric(previous)
+        let currentIsNumeric = isNumeric(current)
+        if previousIsNumeric != currentIsNumeric {
+            return true
+        }
+
+        return isLowercase(previous) && isUppercase(current)
+    }
+
+    private func firstAlphaNumericIndex(in text: String) -> String.Index? {
+        var index = text.startIndex
+        while index < text.endIndex {
+            if isAlphaNumeric(text[index]) {
+                return index
+            }
+            index = text.index(after: index)
+        }
+        return nil
+    }
+
+    private func isNumeric(_ character: Character) -> Bool {
+        character.unicodeScalars.contains { CharacterSet.decimalDigits.contains($0) }
+    }
+
+    private func isLowercase(_ character: Character) -> Bool {
+        character.unicodeScalars.contains { CharacterSet.lowercaseLetters.contains($0) }
+    }
+
+    private func isUppercase(_ character: Character) -> Bool {
+        character.unicodeScalars.contains { CharacterSet.uppercaseLetters.contains($0) }
     }
 
     private func hasWordBoundary(before index: String.Index, in text: String) -> Bool {
