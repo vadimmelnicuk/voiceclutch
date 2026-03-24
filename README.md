@@ -8,6 +8,8 @@ Private, free, and on-device voice dictation app for macOS with low-latency stre
 - **Get cleaner output** - Optional LLM final pass improves punctuation, structure, and readability before insertion.
 - **Keep your data local** - Speech recognition and transcript cleanup run on-device for privacy-first usage.
 
+![screenshots](docs/screenshots.png)
+
 ## Features
 
 ### Dictation Workflow & Controls
