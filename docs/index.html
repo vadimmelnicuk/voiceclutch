@@ -1,179 +1,182 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="theme-color" content="#040812">
-    <title>VoiceClutch</title>
-    <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <style>
-        :root {
-            --bg-color: #040812; /* Subtle dark blue tint */
-        }
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#040812">
+  <title>VoiceClutch</title>
+  <link rel="icon" type="image/png" sizes="32x32" href="favicon.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-color: #040812; /* Subtle dark blue tint */
+    }
 
-        body, html {
-            margin: 0;
-            padding: 0;
-            min-height: 100vh;
-            font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-            background-color: var(--bg-color);
-            color: #ffffff;
-            -webkit-font-smoothing: antialiased;
-            -moz-osx-font-smoothing: grayscale;
-        }
+    body, html {
+      margin: 0;
+      padding: 0;
+      min-height: 100vh;
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      background-color: var(--bg-color);
+      color: #ffffff;
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
 
-        body {
-            position: relative;
-            display: flex;
-            flex-direction: column;
-            overflow-x: hidden;
-            overflow-y: auto;
-            overscroll-behavior-y: none;
-        }
+    body {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+      overflow-y: auto;
+      overscroll-behavior-y: none;
+    }
 
-        /* Subtle monochrome background glow */
-        .glow-container {
-            position: absolute; inset: 0; overflow: hidden; z-index: 1; pointer-events: none; 
-        }
-        
-        .glow {
-            position: absolute; inset: 0;
-            width: 100%; height: 100%;
-            background: 
-                radial-gradient(circle at 90% 110%, rgba(229, 168, 139, 0.45) 0%, rgba(186, 125, 110, 0.28) 35%, rgba(110, 65, 70, 0.15) 65%, rgba(60, 40, 50, 0.05) 85%, transparent 100%),
-                radial-gradient(circle at 10% -10%, rgba(30, 50, 80, 0.45) 0%, rgba(20, 35, 60, 0.25) 50%, rgba(10, 20, 35, 0.1) 80%, transparent 100%);
-            filter: blur(30px);
-            transform: scale(1.1);
-        }
+    /* Subtle monochrome background glow */
+    .glow-container {
+      position: absolute; inset: 0; overflow: hidden; z-index: 1; pointer-events: none;
+    }
 
-        /* Monochrome cinematic grain overlay */
-        .grain-layer {
-            position: absolute; inset: 0; z-index: 2; pointer-events: none;
-            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='2.25' numOctaves='8' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
-            opacity: 1;
-            mix-blend-mode: overlay;
-        }
+    .glow {
+      position: absolute; inset: 0;
+      width: 100%; height: 100%;
+      background:
+        radial-gradient(circle at 90% 110%, rgba(229, 168, 139, 0.45) 0%, rgba(186, 125, 110, 0.28) 35%, rgba(110, 65, 70, 0.15) 65%, rgba(60, 40, 50, 0.05) 85%, transparent 100%),
+        radial-gradient(circle at 10% -10%, rgba(30, 50, 80, 0.45) 0%, rgba(20, 35, 60, 0.25) 50%, rgba(10, 20, 35, 0.1) 80%, transparent 100%);
+      filter: blur(30px);
+      transform: scale(1.1);
+    }
 
-        /* Footer Navigation */
-        .footer {
-            padding: 2.5rem;
-            display: flex; justify-content: center; align-items: center;
-            z-index: 100;
-            margin-top: auto;
-        }
-        
-        .footer-links {
-            display: flex; gap: 2.5rem;
-        }
-        
-        .footer-links a {
-            color: rgba(255, 255, 255, 0.5); text-decoration: none; font-size: 0.9rem; font-weight: 500;
-            transition: color 0.2s;
-        }
-        
-        .footer-links a:hover { color: #fff; }
+    /* Monochrome cinematic grain overlay */
+    .grain-layer {
+      position: absolute; inset: 0; z-index: 2; pointer-events: none;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='2.25' numOctaves='8' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+      opacity: 1;
+      mix-blend-mode: overlay;
+    }
 
-        .hero-logo { 
-            width: 250px; height: 250px; 
-            margin-top: 6vh;
-            margin-bottom: 2rem; 
-        }
+    /* Footer Navigation */
+    .footer {
+      padding: 2.5rem;
+      display: flex; justify-content: center; align-items: center;
+      z-index: 100;
+      margin-top: auto;
+    }
 
-        /* Centered Hero Content */
-        .hero {
-            position: relative; z-index: 10;
-            flex: 1; min-height: 600px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
-            text-align: center; padding: 0 1rem;
-        }
+    .footer-links {
+      display: flex; gap: 2.5rem;
+    }
 
-        h1 {
-            font-size: 4rem; font-weight: 600; letter-spacing: -0.04em;
-            margin: 0 0 1.25rem; color: #ffffff;
-            max-width: 900px; line-height: 1.05;
-        }
-        
-        .gradient-text {
-            background: linear-gradient(135deg, #fff3dd 0%, #6c6c80 100%);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            background-clip: text;
-        }
+    .footer-links a {
+      color: rgba(255, 255, 255, 0.5); text-decoration: none; font-size: 0.9rem; font-weight: 500;
+      transition: color 0.2s;
+    }
 
-        p.subtitle {
-            font-size: 1.2rem; font-weight: 400; color: rgba(255, 255, 255, 0.5);
-            margin: 0 0 3rem; line-height: 1.6; max-width: 600px;
-        }
+    .footer-links a:hover { color: #fff; }
 
-        .actions { display: flex; gap: 1rem; align-items: center; justify-content: center; flex-wrap: wrap; }
+    .hero-logo {
+      width: 250px; height: 250px;
+      margin-top: 6vh;
+      margin-bottom: 2rem;
+    }
 
-        .btn-primary {
-            display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-            background: #ffffff; color: #000000;
-            padding: 0.85rem 1.25rem; border-radius: 9999px;
-            text-decoration: none; font-weight: 500; font-size: 0.95rem;
-            transition: box-shadow 0.2s;
-            box-shadow: 0 4px 14px rgba(255,255,255,0.1);
-            width: 240px;
-            box-sizing: border-box;
-        }
-        
-        .btn-primary:hover { box-shadow: 0 6px 24px rgba(255,255,255,0.2); }
+    /* Centered Hero Content */
+    .hero {
+      position: relative; z-index: 10;
+      flex: 1; min-height: 600px; display: flex; flex-direction: column; align-items: center; justify-content: flex-start;
+      text-align: center; padding: 0 1rem;
+    }
 
-        .btn-secondary {
-            display: inline-flex; align-items: center; justify-content: center; gap: 8px;
-            background: rgba(255,255,255,0.03); color: #ffffff;
-            padding: 0.85rem 1.25rem; border-radius: 9999px;
-            text-decoration: none; font-weight: 500; font-size: 0.95rem;
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            transition: background 0.2s, border-color 0.2s;
-            width: 240px;
-            box-sizing: border-box;
-        }
-        
-        .btn-secondary:hover {
-            background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.2);
-        }
-        
-        @media (max-width: 768px) {
-            .hero-logo { width: 160px; height: 160px; margin-bottom: 1.5rem; }
-            h1 { font-size: 3rem; }
-            p.subtitle { font-size: 1.1rem; }
-            .footer { padding: 1.5rem; }
-        }
-    </style>
+    h1 {
+      font-size: 4rem; font-weight: 600; letter-spacing: -0.04em;
+      margin: 0 0 1.25rem; color: #ffffff;
+      max-width: 900px; line-height: 1.05;
+    }
+
+    .gradient-text {
+      background: linear-gradient(135deg, #fff3dd 0%, #6c6c80 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    p.subtitle {
+      font-size: 1.2rem; font-weight: 400; color: rgba(255, 255, 255, 0.5);
+      margin: 0 0 3rem; line-height: 1.6; max-width: 600px;
+    }
+
+    .actions { display: flex; gap: 1rem; align-items: center; justify-content: center; flex-wrap: wrap; }
+
+    .btn-primary {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      background: #ffffff; color: #000000;
+      padding: 0.85rem 1.25rem; border-radius: 9999px;
+      text-decoration: none; font-weight: 500; font-size: 0.95rem;
+      transition: box-shadow 0.2s;
+      box-shadow: 0 4px 14px rgba(255,255,255,0.1);
+      width: 240px;
+      box-sizing: border-box;
+    }
+
+    .btn-primary:hover { box-shadow: 0 6px 24px rgba(255,255,255,0.2); }
+
+    .btn-secondary {
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      background: rgba(255,255,255,0.03); color: #ffffff;
+      padding: 0.85rem 1.25rem; border-radius: 9999px;
+      text-decoration: none; font-weight: 500; font-size: 0.95rem;
+      border: 1px solid rgba(255, 255, 255, 0.1);
+      transition: background 0.2s, border-color 0.2s;
+      width: 240px;
+      box-sizing: border-box;
+    }
+
+    .btn-secondary:hover {
+      background: rgba(255, 255, 255, 0.08); border-color: rgba(255, 255, 255, 0.2);
+    }
+
+    @media (max-width: 768px) {
+      .hero-logo { width: 160px; height: 160px; margin-bottom: 1.5rem; }
+      h1 { font-size: 3rem; }
+      p.subtitle { font-size: 1.1rem; }
+      .footer { padding: 1.5rem; }
+    }
+  </style>
 </head>
 <body>
-    <!-- Subtle center glow -->
-    <div class="glow-container">
-        <div class="glow"></div>
+  <!-- Subtle center glow -->
+  <div class="glow-container">
+    <div class="glow"></div>
+  </div>
+
+  <!-- Monochrome grain -->
+  <div class="grain-layer"></div>
+
+  <main class="hero">
+    <img src="VoiceClutch.png" alt="VoiceClutch Logo" class="hero-logo">
+    <h1 class="gradient-text">VoiceClutch<br /></h1>
+    <p class="subtitle">Private, free, and on-device voice dictation app for macOS with low-latency streaming transcription and LLM-powered corrections</p>
+    <div class="actions">
+      <a href="https://github.com/vadimmelnicuk/voiceclutch/releases/latest" target="_blank" class="btn-primary">
+        <svg width="24" height="24" fill="currentColor" viewBox="0 0 384 512"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.5-67.8 36.1-14.2 18.1-26.5 48.7-22.7 75.6 26.1 2 52-16.7 66.5-39.2z"/></svg>
+        Download for macOS
+      </a>
+      <a href="https://github.com/vadimmelnicuk/voiceclutch" target="_blank" class="btn-secondary">
+        <svg width="24" height="24" fill="currentColor" viewBox="0 0 496 512"><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg>
+        Open Source
+      </a>
     </div>
-    
-    <!-- Monochrome grain -->
-    <div class="grain-layer"></div>
+  </main>
 
-    <main class="hero">
-        <img src="VoiceClutch.png" alt="VoiceClutch Logo" class="hero-logo">
-        <h1 class="gradient-text">VoiceClutch<br /></h1>
-        <p class="subtitle">Private, free, and on-device voice dictation app for macOS with low-latency streaming transcription and LLM-powered corrections</p>
-        <div class="actions">
-            <a href="https://github.com/vadimmelnicuk/voiceclutch/releases/latest" target="_blank" class="btn-primary">
-                <svg width="24" height="24" fill="currentColor" viewBox="0 0 384 512"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.5-67.8 36.1-14.2 18.1-26.5 48.7-22.7 75.6 26.1 2 52-16.7 66.5-39.2z"/></svg>
-                Download for macOS
-            </a>
-            <a href="https://github.com/vadimmelnicuk/voiceclutch" target="_blank" class="btn-secondary">
-                <svg width="24" height="24" fill="currentColor" viewBox="0 0 496 512"><path d="M165.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3 .3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6zm-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5 .3-6.2 2.3zm44.2-1.7c-2.9 .7-4.9 2.6-4.6 4.9 .3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9zM244.8 8C106.1 8 0 113.3 0 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C428.2 457.8 496 362.9 496 252 496 113.3 383.5 8 244.8 8zM97.2 352.9c-1.3 1-1 3.3 .7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1zm-10.8-8.1c-.7 1.3 .3 2.9 2.3 3.9 1.6 1 3.6 .7 4.3-.7 .7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3 .7zm32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3 .7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1zm-11.4-14.7c-1.6 1-1.6 3.6 0 5.9 1.6 2.3 4.3 3.3 5.6 2.3 1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2z"/></svg>
-                Open Source
-            </a>
-        </div>
-    </main>
-
-    <footer class="footer">
-        <div class="footer-links">
-            <a href="https://vadimmelnicuk.github.io/voiceclutch/privacy-policy/" target="_blank">Privacy</a>
-        </div>
-    </footer>
+  <footer class="footer">
+    <div class="footer-links">
+      <a href="https://vadimmelnicuk.github.io/voiceclutch/privacy-policy/" target="_blank">Privacy</a>
+    </div>
+  </footer>
+  <!-- Cloudflare Web Analytics -->
+  <script defer src='https://static.cloudflareinsights.com/beacon.min.js' data-cf-beacon='{"token": "7e106c8172bf4c55a64fc5c2b58515be"}'></script>
+  <!-- End Cloudflare Web Analytics -->
 </body>
 </html>
